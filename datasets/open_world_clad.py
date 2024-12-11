@@ -44,7 +44,7 @@ class OWCladDetection(torch.utils.data.Dataset):
                  root: str,
                  image_set: str,
                  annot_file: str,
-                 transform: Optional[Callable] = None,
+                 transforms: Optional[Callable] = None,
                  meta: str = None,
                  ):
         super(OWCladDetection).__init__()
@@ -55,13 +55,20 @@ class OWCladDetection(torch.utils.data.Dataset):
         self.image_set = image_set
         self.img_folder = os.path.join(root, 'SSLAD-2D', 'labeled', split)
         self.ids = self.extract_clad_fns(root, image_set)
-        self.transform = transform if transform is not None else get_transform(split == 'train')
+        self.transforms = transforms if transforms is not None else get_transform(split)
         self.meta = meta
         self.CLASS_NAMES = CLAD_CLASS_NAMES['CLAD']
 
         self.obj_annotations, self.img_annotations = load_obj_img_dic(annot_file)
         self._remove_empty_images()
         self.img_anns = self._create_index()
+
+    @staticmethod
+    def convert_image_id(img_id, to_integer=False, to_string=False):
+        if to_integer:
+            return int(img_id)
+        if to_string:
+            return str(img_id)
 
     def extract_clad_fns(self, root, image_set):
         splits_dir = os.path.join(root, 'SSLAD-2D', 'labeled')
@@ -170,8 +177,8 @@ class OWCladDetection(torch.utils.data.Dataset):
         image = self._load_image(index)
         instances = self._load_target(index) # boxes, labels, image_id, sizes(width, height), area, iscrowd
 
-        if self.transform is not None:
-            image, instances = self.transform(image, instances)
+        if self.transforms[-1] is not None:
+            image, instances = self.transforms[-1](image, instances)
 
         w, h = instances["sizes"]
         target = dict(
@@ -395,8 +402,8 @@ class ToTensor(object):
         return image, target
 
 
-def get_transform(train):
+def get_transform(image_set):
     transform_arr = [ToTensor()]
-    if train:
+    if 'train' in image_set:
         transform_arr.append(RandomHorizontalFlip(0.5))
     return Compose(transform_arr)
