@@ -3,10 +3,10 @@ import os
 import itertools
 import torch
 import torchvision
+import datasets.transforms as T
 
 from typing import Optional, List, Sequence, Callable, Dict, Any
 from collections import defaultdict
-from torchvision import transforms as T
 from PIL import Image
 
 from util.clad_utils import load_obj_img_dic, create_domain_dicts
@@ -44,7 +44,7 @@ class OWCladDetection(torch.utils.data.Dataset):
                  root: str,
                  image_set: str,
                  annot_file: str,
-                 transform: Optional[Callable] = None,
+                 transforms: Optional[Callable] = None,
                  meta: str = None,
                  ):
         super(OWCladDetection).__init__()
@@ -55,13 +55,20 @@ class OWCladDetection(torch.utils.data.Dataset):
         self.image_set = image_set
         self.img_folder = os.path.join(root, 'SSLAD-2D', 'labeled', split)
         self.ids = self.extract_clad_fns(root, image_set)
-        self.transform = transform if transform is not None else get_transform(split == 'train')
+        self.transforms = transforms if transforms is not None else get_transform(split)
         self.meta = meta
         self.CLASS_NAMES = CLAD_CLASS_NAMES['CLAD']
 
         self.obj_annotations, self.img_annotations = load_obj_img_dic(annot_file)
         self._remove_empty_images()
         self.img_anns = self._create_index()
+
+    @staticmethod
+    def convert_image_id(img_id, to_integer=False, to_string=False):
+        if to_integer:
+            return int(img_id)
+        if to_string:
+            return str(img_id)
 
     def extract_clad_fns(self, root, image_set):
         splits_dir = os.path.join(root, 'SSLAD-2D', 'labeled')
@@ -170,8 +177,8 @@ class OWCladDetection(torch.utils.data.Dataset):
         image = self._load_image(index)
         instances = self._load_target(index) # boxes, labels, image_id, sizes(width, height), area, iscrowd
 
-        if self.transform is not None:
-            image, instances = self.transform(image, instances)
+        if self.transforms[-1] is not None:
+            image, instances = self.transforms[-1](image, instances)
 
         w, h = instances["sizes"]
         target = dict(
@@ -359,44 +366,39 @@ def create_val_from_trainset(trainset: CladDetection, root, val_transform, split
                                                      f'updated_instance_{split}.json'), val_transform, trainset.meta)
 
 
-# Below adapted from pytorch vision example on detection, but removed unnecessary code.
-
-class Compose(object):
-    def __init__(self, transforms):
-        self.transforms = transforms
-
-    def __call__(self, image, target):
-        for t in self.transforms:
-            image, target = t(image, target)
-        return image, target
-
-
-class RandomHorizontalFlip(object):
-    def __init__(self, prob):
-        self.prob = prob
-        self.transform = T.RandomHorizontalFlip(prob)
-
-    def __call__(self, image, target):
-        self.transform(image)
-        return image, target
+def get_transform(image_set):
     
-    # def __call__(self, image, target):
-    #     if random.random() < self.prob:
-    #         height, width = image.shape[-2:]
-    #         image = image.flip(-1)
-    #         bbox = target["boxes"]
-    #         bbox[:, [0, 2]] = width - bbox[:, [2, 0]]
-    #         target["boxes"] = bbox
-    #     return image, target
+    normalize = T.Compose([
+        T.ToTensor(),
+        T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    ])
+    
+    scales = [480, 512, 544, 576, 608, 640, 672, 704, 736, 768, 800]
+    t = []
+    
+    if 'train' in image_set:
+        t.append(['train'])
+        t.append(T.Compose([
+            T.RandomHorizontalFlip(),
+            T.RandomResize(scales, max_size=1333),
+            normalize,
+        ]))
+        return t
+    
+    elif 'val' in image_set:
+        t.append(['val'])
+        t.append(T.Compose([
+            T.RandomResize([800], max_size=1333),
+            normalize,
+        ]))
+        return t
+    
+    elif 'test' in image_set:
+        t.append(['test'])
+        t.append(T.Compose([
+            T.RandomResize([800], max_size=1333),
+            normalize,
+        ]))
+        return t
 
-class ToTensor(object):
-    def __call__(self, image, target):
-        image = torchvision.transforms.functional.to_tensor(image)
-        return image, target
-
-
-def get_transform(train):
-    transform_arr = [ToTensor()]
-    if train:
-        transform_arr.append(RandomHorizontalFlip(0.5))
-    return Compose(transform_arr)
+    raise ValueError(f'unknown {image_set}')
