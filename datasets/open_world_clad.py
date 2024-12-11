@@ -3,10 +3,10 @@ import os
 import itertools
 import torch
 import torchvision
+import datasets.transforms as T
 
 from typing import Optional, List, Sequence, Callable, Dict, Any
 from collections import defaultdict
-from torchvision import transforms as T
 from PIL import Image
 
 from util.clad_utils import load_obj_img_dic, create_domain_dicts
@@ -366,44 +366,39 @@ def create_val_from_trainset(trainset: CladDetection, root, val_transform, split
                                                      f'updated_instance_{split}.json'), val_transform, trainset.meta)
 
 
-# Below adapted from pytorch vision example on detection, but removed unnecessary code.
-
-class Compose(object):
-    def __init__(self, transforms):
-        self.transforms = transforms
-
-    def __call__(self, image, target):
-        for t in self.transforms:
-            image, target = t(image, target)
-        return image, target
-
-
-class RandomHorizontalFlip(object):
-    def __init__(self, prob):
-        self.prob = prob
-        self.transform = T.RandomHorizontalFlip(prob)
-
-    def __call__(self, image, target):
-        self.transform(image)
-        return image, target
-    
-    # def __call__(self, image, target):
-    #     if random.random() < self.prob:
-    #         height, width = image.shape[-2:]
-    #         image = image.flip(-1)
-    #         bbox = target["boxes"]
-    #         bbox[:, [0, 2]] = width - bbox[:, [2, 0]]
-    #         target["boxes"] = bbox
-    #     return image, target
-
-class ToTensor(object):
-    def __call__(self, image, target):
-        image = torchvision.transforms.functional.to_tensor(image)
-        return image, target
-
-
 def get_transform(image_set):
-    transform_arr = [ToTensor()]
+    
+    normalize = T.Compose([
+        T.ToTensor(),
+        T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    ])
+    
+    scales = [480, 512, 544, 576, 608, 640, 672, 704, 736, 768, 800]
+    t = []
+    
     if 'train' in image_set:
-        transform_arr.append(RandomHorizontalFlip(0.5))
-    return Compose(transform_arr)
+        t.append(['train'])
+        t.append(T.Compose([
+            T.RandomHorizontalFlip(),
+            T.RandomResize(scales, max_size=1333),
+            normalize,
+        ]))
+        return t
+    
+    elif 'val' in image_set:
+        t.append(['val'])
+        t.append(T.Compose([
+            T.RandomResize([800], max_size=1333),
+            normalize,
+        ]))
+        return t
+    
+    elif 'test' in image_set:
+        t.append(['test'])
+        t.append(T.Compose([
+            T.RandomResize([800], max_size=1333),
+            normalize,
+        ]))
+        return t
+
+    raise ValueError(f'unknown {image_set}')
