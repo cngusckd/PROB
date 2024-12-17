@@ -26,6 +26,7 @@ import datasets.samplers as samplers
 from datasets import build_dataset, get_coco_api_from_dataset
 from datasets.coco import make_coco_transforms
 from datasets.torchvision_datasets.open_world import OWDetection
+from datasets.open_world_clad import OWCladDetection
 from engine import evaluate, train_one_epoch, get_exemplar_replay
 from models import build_model
 import wandb
@@ -396,8 +397,17 @@ def get_datasets(args):
 
     train_set = args.train_set
     test_set = args.test_set
-    dataset_train = OWDetection(args, args.data_root, image_set=args.train_set, transforms=make_coco_transforms(args.train_set), dataset = args.dataset)
-    dataset_val = OWDetection(args, args.data_root, image_set=args.test_set, dataset = args.dataset, transforms=make_coco_transforms(args.test_set))
+
+    if args.dataset == "CLAD":
+        annot_path = os.path.join(args.data_root, 'SSLAD-2D', 'labeled', 'annotations')
+        train_annot_file = os.path.join(annot_path, 'updated_instance_train.json')
+        test_annot_file = os.path.join(annot_path, 'updated_instance_test.json')
+
+        dataset_train = OWCladDetection(args, args.data_root, image_set=args.train_set, annot_file=train_annot_file)
+        dataset_val = OWCladDetection(args, args.data_root, image_set=args.test_set, annot_file=test_annot_file)
+    else:    
+        dataset_train = OWDetection(args, args.data_root, image_set=args.train_set, transforms=make_coco_transforms(args.train_set), dataset = args.dataset)
+        dataset_val = OWDetection(args, args.data_root, image_set=args.test_set, dataset = args.dataset, transforms=make_coco_transforms(args.test_set))
 
     print(args.train_set)
     print(args.test_set)

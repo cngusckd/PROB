@@ -19,6 +19,7 @@ import torch
 import util.misc as utils
 from datasets.coco_eval import CocoEvaluator
 from datasets.open_world_eval import OWEvaluator
+from datasets.open_world_eval_clad import OWCLADEvaluator
 from datasets.panoptic_eval import PanopticEvaluator
 from datasets.data_prefetcher import data_prefetcher
 from util.box_ops import box_xyxy_to_cxcywh, box_cxcywh_to_xyxy
@@ -103,7 +104,10 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = 'Test:'
     iou_types = tuple(k for k in ('segm', 'bbox') if k in postprocessors.keys())
-    coco_evaluator = OWEvaluator(base_ds, iou_types, args=args)
+    if args.dataset == 'CLAD':
+        coco_evaluator = OWCLADEvaluator(base_ds, iou_types, args=args)
+    else:
+        coco_evaluator = OWEvaluator(base_ds, iou_types, args=args)
  
     panoptic_evaluator = None
     if 'panoptic' in postprocessors.keys():
