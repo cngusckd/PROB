@@ -11,7 +11,7 @@ from util.misc import all_gather
 from collections import OrderedDict, defaultdict
 
 
-class OWEvaluator:
+class OWCLADEvaluator:
     def __init__(self, voc_gt, iou_types, args=None, use_07_metric=True, ovthresh=list(range(50, 100, 5))):
         assert tuple(iou_types) == ('bbox',)
         self.use_07_metric = use_07_metric
@@ -53,8 +53,9 @@ class OWEvaluator:
     def update(self, predictions):
         for img_id, pred in predictions.items():
             pred_boxes, pred_labels, pred_scores = [pred[k].cpu() for k in ['boxes', 'labels', 'scores']]
+            
             # image_id = self.voc_gt.convert_image_id(int(img_id), to_string=True)
-            image_id = self.voc_gt.conver_image_id(int(img_id), to_string=True)
+            image_id = self.voc_gt.convert_image_id(int(img_id), to_string=True)
             classes = pred_labels.tolist()
             for (xmin, ymin, xmax, ymax), cls, score in zip(pred_boxes.tolist(), classes , pred_scores.tolist()):
                 xmin += 1

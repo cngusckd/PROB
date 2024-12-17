@@ -177,8 +177,9 @@ class OWDetection(VisionDataset):
             self.image_set.extend(file_names)
             self.images.extend([os.path.join(image_dir, x + ".jpg") for x in file_names])
             self.annotations.extend([os.path.join(annotation_dir, x + ".xml") for x in file_names])
-            self.imgids.extend(self.convert_image_id(x, to_integer=True) for x in file_names)
-            
+            # self.imgids.extend(self.convert_image_id(x, to_integer=True) for x in file_names)
+            self.imgids.extend((self.convert_image_id(img_id=x, to_integer=True) for x in file_names))
+        print(self.annotations)    
         self.imgid2annotations.update(dict(zip(self.imgids, self.annotations)))
 
         if filter_pct > 0:
@@ -224,6 +225,17 @@ class OWDetection(VisionDataset):
             )
             instances.append(instance)
         return target, instances
+    
+    def convert_image_id(img_id, to_integer=False, to_string=False, prefix='2021'):
+        if to_integer:
+            return int(prefix + img_id.replace('_', ''))
+        if to_string:
+            x = str(img_id)
+            assert x.startswith(prefix)
+            x = x[len(prefix):]
+            if len(x) == 12 or len(x) == 6:
+                return x
+            return x[:4] + '_' + x[4:]
 
     def extract_fns(self, image_set, voc_root):
         splits_dir = os.path.join(voc_root, 'ImageSets')

@@ -19,6 +19,7 @@ import torch
 import util.misc as utils
 from datasets.coco_eval import CocoEvaluator
 from datasets.open_world_eval import OWEvaluator
+from datasets.open_world_eval_clad import OWCLADEvaluator
 from datasets.panoptic_eval import PanopticEvaluator
 from datasets.data_prefetcher import data_prefetcher
 from util.box_ops import box_xyxy_to_cxcywh, box_cxcywh_to_xyxy
@@ -42,6 +43,8 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     samples, targets = prefetcher.next()
 
     for _ in metric_logger.log_every(range(len(data_loader)), print_freq, header):
+        
+        
         outputs = model(samples)
         loss_dict = criterion(outputs, targets) 
         weight_dict = deepcopy(criterion.weight_dict)
@@ -90,6 +93,12 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         metric_logger.update(grad_norm=grad_total_norm)
         
         samples, targets = prefetcher.next()
+        
+        # 학습 시퀀스 스킵하기 위해서 break문 추가 - 현창
+        break
+    
+    
+    
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
@@ -137,6 +146,7 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
                 res_pano[i]["file_name"] = file_name
  
             panoptic_evaluator.update(res_pano)
+        
  
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
@@ -165,7 +175,80 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
         stats['PQ_th'] = panoptic_res["Things"]
         stats['PQ_st'] = panoptic_res["Stuff"]
     return stats, coco_evaluator
+
+## ORIGINAL FUNCTION
+@torch.no_grad()
+def clad_evaluate(model, criterion, postprocessors, data_loader, base_ds, device, output_dir, args):
+    model.eval()
+    criterion.eval()
+    metric_logger = utils.MetricLogger(delimiter="  ")
+    header = 'Test:'
+    iou_types = tuple(k for k in ('segm', 'bbox') if k in postprocessors.keys())
+    coco_evaluator = OWCLADEvaluator(base_ds, iou_types, args=args)
  
+    panoptic_evaluator = None
+    if 'panoptic' in postprocessors.keys():
+        panoptic_evaluator = PanopticEvaluator(
+            data_loader.dataset.ann_file,
+            data_loader.dataset.ann_folder,
+            output_dir=os.path.join(output_dir, "panoptic_eval"),
+        )
+ 
+    for samples, targets in metric_logger.log_every(data_loader, 10, header):
+        samples = samples.to(device)
+        targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
+        outputs = model(samples)
+
+        orig_target_sizes = torch.stack([t["orig_size"] for t in targets], dim=0)
+        results = postprocessors['bbox'](outputs, orig_target_sizes)
+ 
+        if 'segm' in postprocessors.keys():
+            target_sizes = torch.stack([t["size"] for t in targets], dim=0)
+            results = postprocessors['segm'](results, outputs, orig_target_sizes, target_sizes)
+        res = {target['image_id'].item(): output for target, output in zip(targets, results)}
+        if coco_evaluator is not None:
+            coco_evaluator.update(res)
+ 
+        if panoptic_evaluator is not None:
+            res_pano = postprocessors["panoptic"](outputs, target_sizes, orig_target_sizes)
+            for i, target in enumerate(targets):
+                image_id = target["image_id"].item()
+                file_name = f"{image_id:012d}.png"
+                res_pano[i]["image_id"] = image_id
+                res_pano[i]["file_name"] = file_name
+ 
+            panoptic_evaluator.update(res_pano)
+        break
+        
+ 
+    # gather the stats from all processes
+    metric_logger.synchronize_between_processes()
+    # print("Averaged stats:", metric_logger)
+    if coco_evaluator is not None:
+        coco_evaluator.synchronize_between_processes()
+    if panoptic_evaluator is not None:
+        panoptic_evaluator.synchronize_between_processes()
+ 
+    # accumulate predictions from all images
+    if coco_evaluator is not None:
+        coco_evaluator.accumulate()
+        res = coco_evaluator.summarize()
+    panoptic_res = None
+    if panoptic_evaluator is not None:
+        panoptic_res = panoptic_evaluator.summarize()
+    stats = {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+    stats['metrics']=res
+    if coco_evaluator is not None:
+        if 'bbox' in postprocessors.keys():
+            stats['coco_eval_bbox'] = coco_evaluator.coco_eval['bbox'].stats.tolist()
+        if 'segm' in postprocessors.keys():
+            stats['coco_eval_masks'] = coco_evaluator.coco_eval['segm'].stats.tolist()
+    if panoptic_res is not None:
+        stats['PQ_all'] = panoptic_res["All"]
+        stats['PQ_th'] = panoptic_res["Things"]
+        stats['PQ_st'] = panoptic_res["Stuff"]
+    return stats, coco_evaluator
+
     
 @torch.no_grad()
 def get_exemplar_replay(model, exemplar_selection, device, data_loader):

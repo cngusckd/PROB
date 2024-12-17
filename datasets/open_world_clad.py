@@ -85,6 +85,19 @@ class OWCladDetection(torch.utils.data.Dataset):
         for ann in self.obj_annotations.values():
             img_anns[ann['image_id']].append(ann)
         return img_anns
+    
+    # 함수 추가됨
+    def convert_image_id(img_id, to_integer = False, to_string = False, prefix='2021'):
+                
+        # if to_integer:
+        #     return int(prefix + img_id.replace('_', ''))
+        if to_string:
+            x = str(img_id)
+            # assert x.startswith(prefix)
+            x = x[len(prefix):]
+            if len(x) == 12 or len(x) == 6:
+                return x
+            return x[:4] + '_' + x[4:]
 
     ### OWOD
     def remove_prev_class_and_unk_instances(self, target):
@@ -170,8 +183,10 @@ class OWCladDetection(torch.utils.data.Dataset):
         image = self._load_image(index)
         instances = self._load_target(index) # boxes, labels, image_id, sizes(width, height), area, iscrowd
 
-        if self.transform is not None:
-            image, instances = self.transform(image, instances)
+        # if self.transform is not None:
+            # image, instances = self.transform(image, instances)
+        if self.transform[-1] is not None:
+           image, instances = self.transform[-1](image, instances)
 
         w, h = instances["sizes"]
         target = dict(
