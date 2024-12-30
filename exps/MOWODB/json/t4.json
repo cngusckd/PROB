@@ -1,0 +1,87 @@
+[
+    {
+        "prompt_image": "/workspace/PROB/data/OWOD/JPEGImages/000000148737.jpg",
+        "type": "rect",
+        "prompts": [
+            {
+                "category_id": 68,
+                "rects": [
+                    [
+                        187.0,
+                        196.0,
+                        193.0,
+                        222.0
+                    ]
+                ]
+            }
+        ]
+    },
+    {
+        "prompt_image": "/workspace/PROB/data/OWOD/JPEGImages/000000440154.jpg",
+        "type": "rect",
+        "prompts": [
+            {
+                "category_id": 63,
+                "rects": [
+                    [
+                        43.0,
+                        209.0,
+                        218.99999999999997,
+                        351.0
+                    ]
+                ]
+            }
+        ]
+    },
+    {
+        "prompt_image": "/workspace/PROB/data/OWOD/JPEGImages/000000576155.jpg",
+        "type": "rect",
+        "prompts": [
+            {
+                "category_id": 76,
+                "rects": [
+                    [
+                        216.0,
+                        333.0,
+                        268.0,
+                        415.0
+                    ]
+                ]
+            }
+        ]
+    },
+    {
+        "prompt_image": "/workspace/PROB/data/OWOD/JPEGImages/000000308730.jpg",
+        "type": "rect",
+        "prompts": [
+            {
+                "category_id": 79,
+                "rects": [
+                    [
+                        175.0,
+                        163.0,
+                        184.0,
+                        203.0
+                    ]
+                ]
+            }
+        ]
+    },
+    {
+        "prompt_image": "/workspace/PROB/data/OWOD/JPEGImages/000000361361.jpg",
+        "type": "rect",
+        "prompts": [
+            {
+                "category_id": 67,
+                "rects": [
+                    [
+                        251.0,
+                        237.0,
+                        285.0,
+                        270.0
+                    ]
+                ]
+            }
+        ]
+    }
+]
