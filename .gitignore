@@ -129,3 +129,4 @@ dmypy.json
 .pyre/
 
 data/data/OWOD/Annotations/readme.md
+data/OWOD/ImageSets/OWDETR/owdetr_t1_train.txt
