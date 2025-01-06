@@ -96,9 +96,14 @@ T4_CLASS_NAMES = [
     "vase", "scissors", "teddy bear", "hair drier", "toothbrush",
     "wine glass", "cup", "fork", "knife", "spoon", "bowl"
 ]
+
+CLAD_CLASS_NAMES = [
+    'Car', 'Truck', 'Tram', 'Cyclist', 'Tricycle', 'Pedestrian'
+]
+
 VOC_COCO_CLASS_NAMES["TOWOD"] = tuple(itertools.chain(VOC_CLASS_NAMES, T2_CLASS_NAMES, T3_CLASS_NAMES, T4_CLASS_NAMES, UNK_CLASS))
 VOC_COCO_CLASS_NAMES["VOC2007"] = tuple(itertools.chain(VOC_CLASS_NAMES, T2_CLASS_NAMES, T3_CLASS_NAMES, T4_CLASS_NAMES, UNK_CLASS))
-
+VOC_COCO_CLASS_NAMES['CLAD'] = tuple(itertools.chain(CLAD_CLASS_NAMES, UNK_CLASS))
 
 print(VOC_COCO_CLASS_NAMES)
 

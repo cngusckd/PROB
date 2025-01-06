@@ -5,7 +5,8 @@ ARGS = DotMap(
     frozen_weights=None,
     seed=0,
     device='cuda',
-    data_root='data/OWOD',
+    data_root = 'data/OWOD',
+    # data_root = 'data/OWOD/data/OWOD'
     batch_size=2,
     num_workers=8,
     lr_linear_proj_names=['reference_points', 'sampling_offsets'],
@@ -21,7 +22,7 @@ ARGS = DotMap(
     clip_max_norm=0.1,
     
     # build_model
-    num_classes=81,
+    num_classes=8,
     num_queries=100,
     num_feature_levels=4,
     aux_loss=True,
@@ -64,7 +65,7 @@ ARGS = DotMap(
     dataset='TOWOD',
     PREV_INTRODUCED_CLS=0,
     CUR_INTRODUCED_CLS=5,
-    train_set='owod_t1_5classes_train', 
+    train_set='owod_t1_train', 
     test_set='owod_all_task_test',
     epochs=5,
     model_type='prob',
