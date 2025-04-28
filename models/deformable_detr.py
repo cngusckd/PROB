@@ -24,6 +24,7 @@ from .matcher import build_matcher
 from .segmentation import (DETRsegm, PostProcessPanoptic, PostProcessSegm,
                            dice_loss, sigmoid_focal_loss) #, sigmoid_focal_loss_CA)
 from .deformable_transformer import build_deforamble_transformer
+from .deformable_transformer_lite import build_deforamble_transformer as build_deforamble_transformer_lite
 import copy
 import heapq
 import operator
@@ -673,7 +674,10 @@ def build(args):
 
     backbone = build_backbone(args)
 
-    transformer = build_deforamble_transformer(args)
+    if "lite" not in args.model_type:
+        transformer = build_deforamble_transformer(args)
+    else:
+        transformer = build_deforamble_transformer_lite(args)
 
     prev_intro_cls = args.PREV_INTRODUCED_CLS
     curr_intro_cls = args.CUR_INTRODUCED_CLS

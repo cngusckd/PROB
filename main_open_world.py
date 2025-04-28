@@ -137,7 +137,7 @@ def get_args_parser():
 
     ################ PROB OWOD ################
     # model config
-    parser.add_argument('--model_type', default='prob', type=str)
+    parser.add_argument('--model_type', default='prob', type=str, choices=('prob', 'lite-prob'))
     
     # logging
     parser.add_argument('--wandb_name', default='', type=str)
