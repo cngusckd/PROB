@@ -47,7 +47,7 @@ ARGS = DotMap(
     dilation=False,
     position_embedding='sine',
     
-    # build_deforamble_transformer
+    # build_deformable_transformer
     nheads=8,
     enc_layers=6,
     dim_feedforward=1024,

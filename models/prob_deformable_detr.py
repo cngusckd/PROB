@@ -24,8 +24,8 @@ from .matcher import build_matcher
 from .segmentation import (DETRsegm, PostProcessPanoptic, PostProcessSegm,
                            dice_loss)
 from .segmentation import sigmoid_focal_loss as seg_sigmoid_focal_loss
-from .deformable_transformer import build_deforamble_transformer
-from .deformable_transformer_lite import build_deforamble_transformer as build_deforamble_transformer_lite
+from .deformable_transformer import build_deformable_transformer
+from .deformable_transformer_lite import build_deformable_transformer  as build_deformable_transformer_lite
 import copy
 
 
@@ -601,9 +601,9 @@ def build(args):
     
     backbone = build_backbone(args)
     if "lite" not in args.model_type:
-        transformer = build_deforamble_transformer(args)
+        transformer = build_deformable_transformer(args)
     else:
-        transformer = build_deforamble_transformer_lite(args)
+        transformer = build_deformable_transformer_lite(args)
     
     model = DeformableDETR(
         backbone,
