@@ -25,7 +25,6 @@ from .segmentation import (DETRsegm, PostProcessPanoptic, PostProcessSegm,
                            dice_loss)
 from .segmentation import sigmoid_focal_loss as seg_sigmoid_focal_loss
 from .deformable_transformer import build_deformable_transformer
-from .deformable_transformer_lite import build_deformable_transformer  as build_deformable_transformer_lite
 import copy
 
 
@@ -321,7 +320,6 @@ class SetCriterion(nn.Module):
         self.invalid_cls_logits = invalid_cls_logits
         self.min_obj=-hidden_dim*math.log(0.9)
 
-
     def loss_labels(self, outputs, targets, indices, num_boxes, log=True):
         """Classification loss (NLL)
         targets dicts must contain the key "labels" containing a tensor of dim [nb_target_boxes]
@@ -600,11 +598,9 @@ def build(args):
     device = torch.device(args.device)
     
     backbone = build_backbone(args)
-    if "lite" not in args.model_type:
-        transformer = build_deformable_transformer(args)
-    else:
-        transformer = build_deformable_transformer_lite(args)
     
+    transformer = build_deformable_transformer(args)
+
     model = DeformableDETR(
         backbone,
         transformer,
