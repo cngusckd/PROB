@@ -629,10 +629,9 @@ def build(args):
         aux_weight_dict.update({k + f'_enc': v for k, v in weight_dict.items()})
         weight_dict.update(aux_weight_dict)
 
-    losses = ['labels', 'boxes', 'cardinality','obj_likelihood']
+    losses = ['labels', 'boxes', 'cardinality', 'obj_likelihood']
     if args.masks:
         losses += ["masks"]
-
         
     criterion = SetCriterion(num_classes, matcher, weight_dict, losses, invalid_cls_logits, args.hidden_dim, focal_alpha=args.focal_alpha)
     criterion.to(device)

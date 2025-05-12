@@ -26,9 +26,10 @@ import datasets.samplers as samplers
 from datasets import build_dataset, get_coco_api_from_dataset
 from datasets.coco import make_coco_transforms
 from datasets.torchvision_datasets.open_world import OWDetection
-from engine import evaluate, train_one_epoch, get_exemplar_replay
+from engine import get_exemplar_replay
 from models import build_model
 import wandb
+from dino_args import args as dino_args
 
 
 
@@ -137,7 +138,7 @@ def get_args_parser():
 
     ################ PROB OWOD ################
     # model config
-    parser.add_argument('--model_type', default='prob', type=str, choices=('prob', 'lite-prob'))
+    parser.add_argument('--model_type', default='lite-prob', type=str, choices=['prob', 'lite-prob'])
     
     # logging
     parser.add_argument('--wandb_name', default='', type=str)
@@ -157,9 +158,65 @@ def get_args_parser():
     parser.add_argument('--exemplar_replay_prev_file', default='', type=str, help="path to previous ft file")
     parser.add_argument('--exemplar_replay_cur_file', default='', type=str, help="path to current ft file")
     parser.add_argument('--exemplar_replay_random', default=False, action='store_true', help='make selection random')
+    
+    ################ Lite-DETR ################
+    # parser.add_argument('--decoder_layer_noise', default=False, type=bool, help='add perturbation to decoder query')
+    # parser.add_argument('--dln_xy_noise', default=0.2, type=float, help='decoder layer noise for xy')
+    # parser.add_argument('--dln_hw_noise', default=0.2, type=float, help='decoder layer noise for hw')
+    # parser.add_argument("--use_detached_boxes_dec_out", action="store_true")
+
+    # parser.add_argument("--dim_feedforward_enc", default=2048, type=int)
+    # parser.add_argument("--unic_layers", default=0, type=int)
+    # parser.add_argument("--pre_norm", action="store_true")
+    # parser.add_argument("--query_dim", default=4, type=int)
+    # parser.add_argument("--transformer_activation", default="relu", type=str)
+    # parser.add_argument("--num_patterns", default=0, type=int)
+
+    # parser.add_argument("--use_deformable_box_attn", action="store_true")
+    # parser.add_argument("--box_attn_type", default="roi_align", type=str)
+
+    # parser.add_argument("--add_channel_attention", action="store_true")
+    # parser.add_argument("--add_pos_value", action="store_true")
+    # parser.add_argument("--random_refpoints_xy", action="store_true")
+
+    # parser.add_argument("--two_stage_type", default="standard", type=str)  # ['no', 'standard', 'early']
+    # parser.add_argument("--two_stage_pat_embed", default=0, type=int)
+    # parser.add_argument("--two_stage_add_query_num", default=0, type=int)
+    # parser.add_argument("--two_stage_learn_wh", action="store_true")
+    # parser.add_argument("--two_stage_keep_all_tokens", action="store_true")
+    # parser.add_argument("--dec_layer_number", default=None, type=str)  # stringified list
+
+    # parser.add_argument("--decoder_sa_type", default="sa", type=str)
+    # parser.add_argument("--decoder_module_seq", default=['sa', 'ca', 'ffn'], type=str)
+    # parser.add_argument("--embed_init_tgt", default=True, type=bool)
+    # parser.add_argument("--enc_scale", default=3, type=int)
+    # parser.add_argument("--dim_feedforward_dec", default=2048, type=int)
+    # parser.add_argument("--use_pytorch_version", action="store_true")
+    # parser.add_argument("--value_proj_after", action="store_true")
+    # parser.add_argument("--small_expand", action="store_true")
+    # parser.add_argument("--num_expansion", default=3, type=int)
+    # parser.add_argument("--deformable_use_checkpoint", action="store_true")
+    # parser.add_argument("--same_loc", default=True, type=bool)
+    # parser.add_argument("--proj_key", action="store_true")
+    # parser.add_argument("--key_aware", default=True, type=bool)
+    # # for dn
+    # parser.add_argument("--use_dn", default=True, type=bool) # action="store_true") # True
+    # parser.add_argument("--dn_number", default=100, type=int)
+    # parser.add_argument("--dn_box_noise_scale", default=1.0, type=float)
+    # parser.add_argument("--dn_label_noise_ratio", default=0.5, type=float)
+    # parser.add_argument("--dn_labelbook_size", default=91, type=int)
+    # parser.add_argument("--match_unstable_error", default=None, type=str)
+    # ETC
+    parser.add_argument("--amp", default=True, action="store_true")
+    parser.add_argument("--debug", default=False, action="store_true")
     return parser
 
 def main(args):
+    # Merge dino_args into args
+    for key, value in dino_args.items():
+        if not hasattr(args, key):
+            setattr(args, key, value)
+
     if len(args.wandb_project)>0:
         if len(args.wandb_name)>0:
             wandb.init(project=args.wandb_project, entity="marvl", group=args.wandb_name)
@@ -183,6 +240,11 @@ def main(args):
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
+
+    if args.model_type == 'lite-prob':
+        from engine_lite import train_one_epoch, evaluate
+    else:
+        from engine import train_one_epoch, evaluate
 
     model, criterion, postprocessors, exemplar_selection = build_model(args, mode = args.model_type)
     model.to(device)
@@ -276,7 +338,6 @@ def main(args):
             test_stats, coco_evaluator = evaluate(model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir, args)
             return
         
-        
     if args.resume:
         if args.resume.startswith('https'):
             checkpoint = torch.hub.load_state_dict_from_url(
@@ -331,10 +392,14 @@ def main(args):
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             sampler_train.set_epoch(epoch)
-            
-        train_stats = train_one_epoch(
-            model, criterion, data_loader_train, optimizer, device, epoch, args.nc_epoch, args.clip_max_norm, wandb)
-            
+        
+        if args.model_type == 'lite-prob':
+            train_stats = train_one_epoch(
+                model, criterion, data_loader_train, optimizer, device, epoch, args.nc_epoch, args.clip_max_norm, wandb,
+                wo_class_error=False, args=args)
+        else:
+            train_stats = train_one_epoch(
+                model, criterion, data_loader_train, optimizer, device, epoch, args.nc_epoch, args.clip_max_norm, wandb)
         lr_scheduler.step()
         if args.output_dir:
             checkpoint_paths = [output_dir / 'checkpoint.pth']

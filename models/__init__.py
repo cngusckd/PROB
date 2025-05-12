@@ -8,8 +8,10 @@
 # ------------------------------------------------------------------------
 
 def build_model(args, mode='owdetr'):
-    if mode == 'prob':
+    if 'prob' == mode:
         from .prob_deformable_detr import build
+    elif 'lite-prob' == mode:
+        from .prob_dino_lite import build_dino as build
     else:
         from .deformable_detr import build
     return build(args)

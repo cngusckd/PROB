@@ -242,7 +242,6 @@ class DeformableTransformer(nn.Module):
         if two_stage_type == 'no':
             self.init_ref_points(num_queries) # init self.refpoint_embed
 
-
         self.enc_out_class_embed = None
         self.enc_out_bbox_embed = None
 
@@ -283,7 +282,6 @@ class DeformableTransformer(nn.Module):
         if self.two_stage_learn_wh:
             nn.init.constant_(self.two_stage_wh_embedding.weight, math.log(0.05 / (1 - 0.05)))
 
-
     def get_valid_ratio(self, mask):
         _, H, W = mask.shape
         valid_H = torch.sum(~mask[:, :, 0], 1)
@@ -301,8 +299,6 @@ class DeformableTransformer(nn.Module):
             self.refpoint_embed.weight.data[:, :2].uniform_(0,1)
             self.refpoint_embed.weight.data[:, :2] = inverse_sigmoid(self.refpoint_embed.weight.data[:, :2])
             self.refpoint_embed.weight.data[:, :2].requires_grad = False
-
-    
 
     def forward(self, srcs, masks, refpoint_embed, pos_embeds, tgt, attn_mask=None):
         """
@@ -326,7 +322,6 @@ class DeformableTransformer(nn.Module):
             bs, c, h, w = src.shape
             spatial_shape = (h, w)
             spatial_shapes.append(spatial_shape)
-
             src = src.flatten(2).transpose(1, 2)                # bs, hw, c
             mask = mask.flatten(1)                              # bs, hw
             pos_embed = pos_embed.flatten(2).transpose(1, 2)    # bs, hw, c
@@ -337,6 +332,7 @@ class DeformableTransformer(nn.Module):
             lvl_pos_embed_flatten.append(lvl_pos_embed)
             src_flatten.append(src)
             mask_flatten.append(mask)
+
         src_flatten = torch.cat(src_flatten, 1)    # bs, \sum{hxw}, c 
         mask_flatten = torch.cat(mask_flatten, 1)   # bs, \sum{hxw}
         lvl_pos_embed_flatten = torch.cat(lvl_pos_embed_flatten, 1) # bs, \sum{hxw}, c 
@@ -790,8 +786,6 @@ class TransformerDecoder(nn.Module):
             if self.training and self.decoder_query_perturber is not None and layer_id != 0:
                 reference_points = self.decoder_query_perturber(reference_points)
 
-
-
             if self.deformable_decoder:
                 if reference_points.shape[-1] == 4:
                     reference_points_input = reference_points[:, :, None] \
@@ -872,7 +866,6 @@ class TransformerDecoder(nn.Module):
                     ref_points.append(reference_points)
                 else:
                     ref_points.append(new_reference_points)
-
 
             intermediate.append(self.norm(output))
             if self.dec_layer_number is not None and layer_id != self.num_layers - 1:
@@ -1023,14 +1016,10 @@ class DeformableTransformerDecoderLayer(nn.Module):
         if decoder_sa_type == 'ca_content':
             self.self_attn = MSDeformAttn(d_model, n_levels, n_heads, n_points)
 
-
-
-
     def rm_self_attn_modules(self):
         self.self_attn = None
         self.dropout2 = None
         self.norm2 = None
-
 
     @staticmethod
     def with_pos_embed(tensor, pos):
