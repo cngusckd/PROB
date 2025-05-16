@@ -186,6 +186,9 @@ class OWDetection(VisionDataset):
             
         self.imgid2annotations.update(dict(zip(self.imgids, self.annotations)))
 
+        if args.dataset == 'CLAD':
+            self._remove_empty_images()
+
         if filter_pct > 0:
             num_keep = float(len(self.imgids)) * filter_pct
             keep = np.random.choice(np.arange(len(self.imgids)), size=round(num_keep), replace=False).tolist()
@@ -237,6 +240,25 @@ class OWDetection(VisionDataset):
         with open(os.path.join(split_f), "r") as f:
             file_names = [x.strip() for x in f.readlines()]
         return file_names
+
+    ### CLAD
+    def _remove_empty_images(self):
+        """
+        Required because torchvision models can't handle empty lists for bbox in targets
+        """
+        # Filter only the indices with non-empty instances
+        non_empty_data = [
+            (img_set, img, imgid, ann) for img_set, img, imgid, ann in zip(self.image_set, self.images, self.imgids, self.annotations) 
+            if len(self.load_instances(imgid)[1]) > 0
+        ]
+        # Unzip and reassign the filtered data
+        if non_empty_data:
+            self.image_set, self.images, self.imgids, self.annotations = zip(*non_empty_data)
+            self.image_set, self.images, self.imgids, self.annotations = list(self.image_set), list(self.images), list(self.imgids), list(self.annotations)
+            assert len(self.images) == len(self.imgids) == len(self.annotations)
+        else:
+            # Handle the case where all images are empty
+            self.image_set, self.images, self.imgids, self.annotations = [], [], []
 
     ### OWOD
     def remove_prev_class_and_unk_instances(self, target):

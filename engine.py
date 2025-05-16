@@ -29,7 +29,7 @@ from copy import deepcopy
 
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
-                    device: torch.device, epoch: int, nc_epoch: int, max_norm: float = 0, wandb: object = None):
+                    device: torch.device, epoch: int, nc_epoch: int, max_norm: float = 0, wandb: object = None, args = None):
     model.train()
     criterion.train()
     metric_logger = utils.MetricLogger(delimiter="  ")
@@ -41,7 +41,10 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     prefetcher = data_prefetcher(data_loader, device, prefetch=True)
     samples, targets = prefetcher.next()
 
-    for _ in metric_logger.log_every(range(len(data_loader)), print_freq, header):
+    for i in metric_logger.log_every(range(len(data_loader)), print_freq, header):
+        # TODO: remove if after debugging
+        if args.debug and i > 50:
+            break
         outputs = model(samples)
         loss_dict = criterion(outputs, targets) 
         weight_dict = deepcopy(criterion.weight_dict)

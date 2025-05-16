@@ -20,7 +20,7 @@ from copy import deepcopy
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, nc_epoch: int, max_norm: float = 0, wandb: object = None,
-                    wo_class_error=False, args=None):
+                    wo_class_error = False, args = None):
     scaler = torch.amp.GradScaler(enabled=args.amp)
 
     try:
@@ -41,7 +41,10 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     samples, targets = prefetcher.next()
 
     _cnt = 0
-    for _ in metric_logger.log_every(range(len(data_loader)), print_freq, header):
+    for i in metric_logger.log_every(range(len(data_loader)), print_freq, header):
+        # TODO: remove if after debugging
+        if args.debug and i > 50:
+            break
         samples = samples.to(device)
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
 

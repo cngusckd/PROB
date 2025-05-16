@@ -399,7 +399,9 @@ def main(args):
                 wo_class_error=False, args=args)
         else:
             train_stats = train_one_epoch(
-                model, criterion, data_loader_train, optimizer, device, epoch, args.nc_epoch, args.clip_max_norm, wandb)
+                model, criterion, data_loader_train, optimizer, device, epoch, args.nc_epoch, args.clip_max_norm, wandb,
+                args=args)
+            
         lr_scheduler.step()
         if args.output_dir:
             checkpoint_paths = [output_dir / 'checkpoint.pth']
