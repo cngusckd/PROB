@@ -213,9 +213,10 @@ def get_args_parser():
 
 def main(args):
     # Merge dino_args into args
-    for key, value in dino_args.items():
-        if not hasattr(args, key):
-            setattr(args, key, value)
+    if args.model_type == 'lite-prob':
+        for key, value in dino_args.items():
+            if not hasattr(args, key):
+                setattr(args, key, value)
 
     if len(args.wandb_project)>0:
         if len(args.wandb_name)>0:

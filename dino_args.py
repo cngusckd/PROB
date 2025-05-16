@@ -114,3 +114,31 @@ args.use_detached_boxes_dec_out = False
 args.enc_scale = 3
 
 args.drop_lr_now = False
+
+# Parameters from coco_transformer.py
+args.data_aug_scales = [480, 512, 544, 576, 608, 640, 672, 704, 736, 768, 800]
+args.data_aug_max_size = 1333
+args.data_aug_scales2_resize = [400, 500, 600]
+args.data_aug_scales2_crop = [384, 600]
+
+args.data_aug_scale_overlap = None
+
+args.dim_feedforward_enc = 2048
+args.dim_feedforward_dec = 2048
+
+args.use_pytorch_version=False
+args.value_proj_after=False
+
+args.num_topk=1000
+args.small_expand=True
+args.num_expansion=3
+args.enc_scale = 3
+
+args.drop_lr_now=False
+args.deformable_use_checkpoint=False
+args.same_loc=False
+args.proj_key=False
+
+# KDA is not implemented in CUDA, to speed up training and inference, use False
+args.key_aware=True
+

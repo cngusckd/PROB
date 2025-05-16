@@ -178,7 +178,7 @@ class MSDeformAttn(nn.Module):
                 value, input_spatial_shapes, sampling_locations, attention_weights,
             )
         else:
-            output = MSDeformAttnFunction.apply(
+            output = MSDeformAttnFunctionLite.apply(
                 value, input_spatial_shapes, input_level_start_index, sampling_locations, attention_weights, self.im2col_step)
         if self.value_proj_after:
             output = self.value_proj(output)
