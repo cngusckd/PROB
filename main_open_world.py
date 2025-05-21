@@ -53,6 +53,7 @@ def get_args_parser():
     parser.add_argument('--two_stage', default=False, action='store_true')
     parser.add_argument('--masks', default=False, action='store_true', help="Train segmentation head if the flag is provided")
     parser.add_argument('--backbone', default='dino_resnet50', type=str, help="Name of the convolutional backbone to use")
+    # parser.add_argument('--backbone', default='mobilenet_v3_small', type=str, help="Name of the convolutional backbone to use")
 
     # Model parameters
     parser.add_argument('--frozen_weights', type=str, default=None,
@@ -325,13 +326,12 @@ def main(args):
             model_without_ddp.prob_obj_head.freeze_prob_model()
             
         obj_bn_mean_before=model_without_ddp.prob_obj_head[0].objectness_bn.running_mean
-    
+
     print(f'Start training from epoch {args.start_epoch} to {args.epochs}')
     start_time = time.time()
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             sampler_train.set_epoch(epoch)
-            
         train_stats = train_one_epoch(
             model, criterion, data_loader_train, optimizer, device, epoch, args.nc_epoch, args.clip_max_norm, wandb)
             

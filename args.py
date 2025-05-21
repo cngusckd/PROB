@@ -42,7 +42,8 @@ ARGS = DotMap(
     
     # build_backbone
     lr_backbone=2e-5,
-    backbone='dino_resnet50',
+    # backbone='dino_resnet50',
+    backbone='mobilenet_v3_large',
     dilation=False,
     position_embedding='sine',
     

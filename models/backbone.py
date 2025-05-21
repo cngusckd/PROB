@@ -11,7 +11,9 @@
 Backbone modules.
 """
 from collections import OrderedDict
+from matplotlib.pylab import norm
 from torchvision.models.resnet import resnet50
+from torchvision.models import mobilenet_v3_large, mobilenet_v3_small
 
 import torch
 import torch.nn.functional as F
@@ -92,30 +94,74 @@ class BackboneBase(nn.Module):
             mask = F.interpolate(m[None].float(), size=x.shape[-2:]).to(torch.bool)[0]
             out[name] = NestedTensor(x, mask)
         return out
+    
+
+class MobileNetV3Backbone(nn.Module):
+    def __init__(self, model_type='large', out_channels=256):
+        super().__init__()
+        if model_type == 'large':
+            backbone = mobilenet_v3_large(pretrained=True)
+            feature_dim = 960
+        else:
+            backbone = mobilenet_v3_small(pretrained=True)
+            feature_dim = 576
+
+        self.features = backbone.features
+        self.conv = nn.Conv2d(feature_dim, out_channels, kernel_size=1)
+        self.strides = [32]
+        self.num_channels = [out_channels]
+
+    def forward(self, tensor_list: NestedTensor):
+        x = self.features(tensor_list.tensors)
+        x = self.conv(x)
+        mask = F.interpolate(tensor_list.mask[None].float(), size=x.shape[-2:]).to(torch.bool)[0]
+        return {'0': NestedTensor(x, mask)}
 
 
-class Backbone(BackboneBase):
-    """ResNet backbone with frozen BatchNorm."""
+class Backbone(nn.Module):
+    """Generic backbone wrapper that supports ResNet and MobileNetV3."""
     def __init__(self, name: str,
                  train_backbone: bool,
                  return_interm_layers: bool,
                  dilation: bool):
-        norm_layer = FrozenBatchNorm2d
-        if name == 'resnet50':
-            print("resnet50")
-            backbone = getattr(torchvision.models, name)(
-                replace_stride_with_dilation=[False, False, dilation],
-                pretrained=is_main_process(), norm_layer=norm_layer)
+        super().__init__()
+
+        if name.startswith('mobilenet_v3'):
+            print(name)
+            model_type = 'large' if 'large' in name else 'small'
+            self.body = MobileNetV3Backbone(model_type=model_type)
+            self.strides = self.body.strides
+            self.num_channels = self.body.num_channels
+
         else:
-            print("DINO resnet50")
-            backbone = resnet50(pretrained=False, replace_stride_with_dilation=[False, False, dilation], norm_layer=norm_layer)
-            if is_main_process():
-                state_dict = torch.load("models/dino_resnet50_pretrain.pth")
-                backbone.load_state_dict(state_dict, strict=False)
-        assert name not in ('resnet18', 'resnet34'), "number of channels are hard coded"
-        super().__init__(backbone, train_backbone, return_interm_layers)
-        if dilation:
-            self.strides[-1] = self.strides[-1] // 2
+            norm_layer = FrozenBatchNorm2d
+            if name == 'resnet50':
+                print("resnet50")
+                backbone = getattr(torchvision.models, name)(
+                    replace_stride_with_dilation=[False, False, dilation],
+                    pretrained=is_main_process(),
+                    norm_layer=norm_layer)
+            else:
+                print("DINO resnet50")
+                backbone = resnet50(pretrained=False,
+                                    replace_stride_with_dilation=[False, False, dilation],
+                                    norm_layer=norm_layer)
+                if is_main_process():
+                    state_dict = torch.load("models/dino_resnet50_pretrain.pth")
+                    backbone.load_state_dict(state_dict, strict=False)
+
+            assert name not in ('resnet18', 'resnet34'), "number of channels are hard coded"
+
+            self.body = BackboneBase(backbone, train_backbone, return_interm_layers)
+            self.strides = self.body.strides
+            self.num_channels = self.body.num_channels
+
+            if dilation:
+                self.strides[-1] //= 2
+
+    def forward(self, tensor_list: NestedTensor):
+        return self.body(tensor_list)
+
 
 
 class Joiner(nn.Sequential):
