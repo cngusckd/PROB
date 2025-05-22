@@ -73,10 +73,24 @@ class BackboneBase(nn.Module):
             if not train_backbone or 'layer2' not in name and 'layer3' not in name and 'layer4' not in name:
                 parameter.requires_grad_(False)
         if return_interm_layers:
-            # return_layers = {"layer1": "0", "layer2": "1", "layer3": "2", "layer4": "3"}
-            return_layers = {"layer2": "0", "layer3": "1", "layer4": "2"}
-            self.strides = [8, 16, 32]
-            self.num_channels = [512, 1024, 2048]
+            if isinstance(backbone, torchvision.models.mobilenet.MobileNetV3):
+                backbone = backbone.features
+                if self.name == 'mobilenet_v3_small':
+                    return_layers = {"3": "0", "8": "1", "12": "2"}
+                    self.num_channels = [24, 48, 576]
+                elif self.name == 'mobilenet_v3_large':
+                    return_layers = {"6": "0", "12": "1", "16": "2"}
+                    self.num_channels = [40, 112, 960]
+                else:
+                    raise ValueError(f"Unknown mobilenet_v3 model: {self.name}")
+                self.strides = [8, 16, 32]
+            elif isinstance(backbone, torchvision.models.resnet.ResNet):
+                # return_layers = {"layer1": "0", "layer2": "1", "layer3": "2", "layer4": "3"}
+                return_layers = {"layer2": "0", "layer3": "1", "layer4": "2"}
+                self.strides = [8, 16, 32]
+                self.num_channels = [512, 1024, 2048]
+            else:
+                raise ValueError(f"Unknown backbone: {backbone}")
         else:
             return_layers = {'layer4': "0"}
             self.strides = [32]
@@ -101,11 +115,25 @@ class Backbone(BackboneBase):
                  return_interm_layers: bool,
                  dilation: bool):
         norm_layer = FrozenBatchNorm2d
+        self.name = name
+
         if name == 'resnet50':
             print("resnet50")
             backbone = getattr(torchvision.models, name)(
                 replace_stride_with_dilation=[False, False, dilation],
                 pretrained=is_main_process(), norm_layer=norm_layer)
+        elif name == 'mobilenet_v3_small':
+            print("mobilenet_v3_small")
+            backbone = getattr(torchvision.models, name)(
+                pretrained=is_main_process(), norm_layer=norm_layer)
+            # mobilenet_v3 has no dilation
+            assert not dilation
+        elif name == 'mobilenet_v3_large':
+            print("mobilenet_v3_large")
+            backbone = getattr(torchvision.models, name)(
+                pretrained=is_main_process(), norm_layer=norm_layer)
+            # mobilenet_v3 has no dilation
+            assert not dilation
         else:
             print("DINO resnet50")
             backbone = resnet50(pretrained=False, replace_stride_with_dilation=[False, False, dilation], norm_layer=norm_layer)
