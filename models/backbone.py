@@ -69,9 +69,24 @@ class BackboneBase(nn.Module):
 
     def __init__(self, backbone: nn.Module, train_backbone: bool, return_interm_layers: bool):
         super().__init__()
-        for name, parameter in backbone.named_parameters():
-            if not train_backbone or 'layer2' not in name and 'layer3' not in name and 'layer4' not in name:
-                parameter.requires_grad_(False)
+        # resnet50
+        if isinstance(backbone, torchvision.models.resnet.ResNet):
+            for name, parameter in backbone.named_parameters():
+                if not train_backbone or 'layer2' not in name and 'layer3' not in name and 'layer4' not in name:
+                    parameter.requires_grad_(False)
+        # mobilenet_v3
+        if isinstance(backbone, torchvision.models.mobilenet.MobileNetV3):
+            if self.name == 'mobilenet_v3_small':
+                for name, parameter in backbone.named_parameters():        
+                    if not train_backbone or 'features.3' not in name and 'features.8' not in name and 'features.12' not in name:
+                        parameter.requires_grad_(False)
+            elif self.name == 'mobilenet_v3_large':
+                for name, parameter in backbone.named_parameters():
+                    if not train_backbone or 'features.6' not in name and 'features.12' not in name and 'features.16' not in name:
+                        parameter.requires_grad_(False)
+            else:
+                raise ValueError(f"Unknown mobilenet_v3 model: {self.name}")
+
         if return_interm_layers:
             if isinstance(backbone, torchvision.models.mobilenet.MobileNetV3):
                 backbone = backbone.features
