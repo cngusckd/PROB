@@ -109,21 +109,22 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         cpu_mem = get_memory_mb()
 
         if args.wandb is not None:
-            wandb.log({"total_loss":loss_value})
-            wandb.log({"cpu_memory": cpu_mem['total']})
-            wandb.log({ "{}_gpu_memory".format(i): mem for i, mem in enumerate(gpu_mem)})
+            # Metric
+            wandb.log({"Train/cpu_memory": cpu_mem['total']})
+            wandb.log({f"Train/gpu_{i}_memory": mem for i, mem in enumerate(gpu_mem)})
+            wandb.log({"Train/total_loss": loss_value})
             wandb.log({
-                "loss_ce_scaled": loss_dict_reduced_scaled["loss_ce"].item(),
-                "loss_bbox_scaled": loss_dict_reduced_scaled["loss_bbox"].item(),
-                "loss_giou_scaled": loss_dict_reduced_scaled["loss_giou"].item(),
+                "Train/loss_ce_scaled": loss_dict_reduced_scaled["loss_ce"].item(),
+                "Train/loss_bbox_scaled": loss_dict_reduced_scaled["loss_bbox"].item(),
+                "Train/loss_giou_scaled": loss_dict_reduced_scaled["loss_giou"].item(),
             })
             wandb.log({
-                "loss_ce_unscaled": loss_dict_reduced_unscaled["loss_ce_unscaled"],
-                "loss_bbox_unscaled": loss_dict_reduced_unscaled["loss_bbox_unscaled"],
-                "loss_giou_unscaled": loss_dict_reduced_unscaled["loss_giou_unscaled"],
-                "class_error_unscaled": loss_dict_reduced_unscaled["class_error_unscaled"],
-                "cardinality_error_unscaled": loss_dict_reduced_unscaled["cardinality_error_unscaled"],
-                "loss_obj_ll_unscaled": loss_dict_reduced_unscaled["loss_obj_ll_unscaled"]
+                "Train/loss_ce_unscaled": loss_dict_reduced_unscaled["loss_ce_unscaled"],
+                "Train/loss_bbox_unscaled": loss_dict_reduced_unscaled["loss_bbox_unscaled"],
+                "Train/loss_giou_unscaled": loss_dict_reduced_unscaled["loss_giou_unscaled"],
+                "Train/class_error_unscaled": loss_dict_reduced_unscaled["class_error_unscaled"],
+                "Train/cardinality_error_unscaled": loss_dict_reduced_unscaled["cardinality_error_unscaled"],
+                "Train/loss_obj_ll_unscaled": loss_dict_reduced_unscaled["loss_obj_ll_unscaled"]
             })
             # wandb.log(loss_dict_reduced_scaled)
             # wandb.log(loss_dict_reduced_unscaled)

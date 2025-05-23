@@ -415,6 +415,7 @@ def main(args):
                 if args.wandb is not None:
                     test_stats["metrics"]['epoch']=epoch
                     wandb.log({str(key): val for key, val in test_stats["metrics"].items()})
+                    wandb.log({"Evaluation/"+str(key): val for key, val in test_stats["metrics"].items()})
             elif epoch > args.epochs-6:
                 checkpoint_paths.append(output_dir / f'checkpoint{epoch:04}.pth')
                 
