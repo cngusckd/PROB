@@ -17,6 +17,7 @@ from typing import Iterable
  
 import torch
 import util.misc as utils
+import wandb
 from copy import deepcopy
 from datasets.coco_eval import CocoEvaluator
 from datasets.open_world_eval import OWEvaluator
@@ -29,7 +30,7 @@ from util.stats import get_memory_mb, get_memory_gpu_mb
 
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
-                    device: torch.device, epoch: int, nc_epoch: int, max_norm: float = 0, wandb: object = None, args = None):
+                    device: torch.device, epoch: int, nc_epoch: int, max_norm: float = 0, args = None):
     model.train()
     criterion.train()
     metric_logger = utils.MetricLogger(delimiter="  ")
@@ -85,7 +86,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         gpu_mem = get_memory_gpu_mb()
         cpu_mem = get_memory_mb()
 
-        if wandb is not None:
+        if args.wandb is not None:
             wandb.log({"total_loss":loss_value})
             wandb.log({"cpu_memory": cpu_mem['total']})
             wandb.log({ "{}_gpu_memory".format(i): mem for i, mem in enumerate(gpu_mem)})
