@@ -10,11 +10,12 @@ from typing import Iterable
 
 import torch
 import util.misc as utils
+from copy import deepcopy
 from datasets.open_world_eval import OWEvaluator
 from datasets.coco_eval import CocoEvaluator
 from datasets.panoptic_eval import PanopticEvaluator
 from datasets.data_prefetcher import data_prefetcher
-from copy import deepcopy
+from util.stats import get_memory_mb, get_memory_gpu_mb
 
 
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
@@ -45,8 +46,6 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         # TODO: remove if after debugging
         if args.debug and i > 50:
             break
-        samples = samples.to(device)
-        targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
 
         with torch.amp.autocast(device_type=device.type, enabled=args.amp):
             if need_tgt_for_training:
@@ -105,10 +104,28 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                 grad_total_norm = utils.get_total_grad_norm(model.parameters(), max_norm)
             optimizer.step()
 
+        gpu_mem = get_memory_gpu_mb()
+        cpu_mem = get_memory_mb()
+
         if wandb is not None:
             wandb.log({"total_loss":loss_value})
-            wandb.log(loss_dict_reduced_scaled)
-            wandb.log(loss_dict_reduced_unscaled)
+            wandb.log({"cpu_memory": cpu_mem['total']})
+            wandb.log({ "{}_gpu_memory".format(i): mem for i, mem in enumerate(gpu_mem)})
+            wandb.log({
+                "loss_ce_scaled": loss_dict_reduced_scaled["loss_ce"].item(),
+                "loss_bbox_scaled": loss_dict_reduced_scaled["loss_bbox"].item(),
+                "loss_giou_scaled": loss_dict_reduced_scaled["loss_giou"].item(),
+            })
+            wandb.log({
+                "loss_ce_unscaled": loss_dict_reduced_unscaled["loss_ce_unscaled"],
+                "loss_bbox_unscaled": loss_dict_reduced_unscaled["loss_bbox_unscaled"],
+                "loss_giou_unscaled": loss_dict_reduced_unscaled["loss_giou_unscaled"],
+                "class_error_unscaled": loss_dict_reduced_unscaled["class_error_unscaled"],
+                "cardinality_error_unscaled": loss_dict_reduced_unscaled["cardinality_error_unscaled"],
+                "loss_obj_ll_unscaled": loss_dict_reduced_unscaled["loss_obj_ll_unscaled"]
+            })
+            # wandb.log(loss_dict_reduced_scaled)
+            # wandb.log(loss_dict_reduced_unscaled)
 
         metric_logger.update(loss=loss_value, **loss_dict_reduced_scaled, **loss_dict_reduced_unscaled)
         if 'class_error' in loss_dict_reduced:
@@ -303,8 +320,6 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
         stats['PQ_all'] = panoptic_res["All"]
         stats['PQ_th'] = panoptic_res["Things"]
         stats['PQ_st'] = panoptic_res["Stuff"]
-
-    # import ipdb; ipdb.set_trace()
 
     return stats, coco_evaluator
 

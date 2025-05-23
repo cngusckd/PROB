@@ -28,8 +28,9 @@ from datasets.coco import make_coco_transforms
 from datasets.torchvision_datasets.open_world import OWDetection
 from engine import get_exemplar_replay
 from models import build_model
-import wandb
 from dino_args import args as dino_args
+
+import wandb
 
 
 
@@ -141,6 +142,7 @@ def get_args_parser():
     parser.add_argument('--model_type', default='lite-prob', type=str, choices=['prob', 'lite-prob'])
     
     # logging
+    parser.add_argument('--wandb_entity', default='', type=str)
     parser.add_argument('--wandb_name', default='', type=str)
     parser.add_argument('--wandb_project', default='', type=str)
     
@@ -218,14 +220,13 @@ def main(args):
             if not hasattr(args, key):
                 setattr(args, key, value)
 
+    args.wandb = None
     if len(args.wandb_project)>0:
         if len(args.wandb_name)>0:
-            wandb.init(project=args.wandb_project, entity="marvl", group=args.wandb_name)
+            wandb.init(project=args.wandb_project, entity=args.wandb_entity, group=args.wandb_name)
         else:
-            wandb.init(project=args.wandb_project, entity="marvl")
-        wandb.config = args
-    else:
-        wandb=None
+            wandb.init(project=args.wandb_project, entity=args.wandb_entity)
+        args.wandb = True
 
     utils.init_distributed_mode(args)
     print("git:\n  {}\n".format(utils.get_sha()))
@@ -411,7 +412,7 @@ def main(args):
                 test_stats, coco_evaluator = evaluate(
                     model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir, args)
                 checkpoint_paths.append(output_dir / f'checkpoint{epoch:04}.pth')
-                if wandb is not None:
+                if args.wandb is not None:
                     test_stats["metrics"]['epoch']=epoch
                     wandb.log({str(key): val for key, val in test_stats["metrics"].items()})
             elif epoch > args.epochs-6:
@@ -477,8 +478,9 @@ def get_datasets(args):
 
 def create_ft_dataset(args, image_sorted_scores):
     print(f'found a total of {len(image_sorted_scores.keys())} images')
-    tmp_dir=args.data_root +'/ImageSets/'+args.dataset+"/"+args.exemplar_replay_dir+"/"
+    # tmp_dir=args.data_root +'/ImageSets/'+args.dataset+"/"+args.exemplar_replay_dir+"/"
     #tmp_dir=args.data_root +'/ImageSets/'+args.exemplar_replay_dir+"/"
+    tmp_dir = args.output_dir+'/'+args.dataset+"/"+args.exemplar_replay_dir+"/"
 
     class_sorted_scores={}
     imgs_per_class={}
