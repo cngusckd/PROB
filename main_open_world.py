@@ -223,9 +223,9 @@ def main(args):
     args.wandb = None
     if len(args.wandb_project)>0:
         if len(args.wandb_name)>0:
-            wandb.init(project=args.wandb_project, entity=args.wandb_entity, group=args.wandb_name)
+            wandb.init(project=args.wandb_project, entity=args.wandb_entity, config=vars(args), group=args.wandb_name)
         else:
-            wandb.init(project=args.wandb_project, entity=args.wandb_entity)
+            wandb.init(project=args.wandb_project, entity=args.wandb_entity, config=vars(args))
         args.wandb = True
 
     utils.init_distributed_mode(args)
@@ -397,11 +397,11 @@ def main(args):
         
         if args.model_type == 'lite-prob':
             train_stats = train_one_epoch(
-                model, criterion, data_loader_train, optimizer, device, epoch, args.nc_epoch, args.clip_max_norm, wandb,
+                model, criterion, data_loader_train, optimizer, device, epoch, args.nc_epoch, args.clip_max_norm,
                 wo_class_error=False, args=args)
         else:
             train_stats = train_one_epoch(
-                model, criterion, data_loader_train, optimizer, device, epoch, args.nc_epoch, args.clip_max_norm, wandb,
+                model, criterion, data_loader_train, optimizer, device, epoch, args.nc_epoch, args.clip_max_norm,
                 args=args)
             
         lr_scheduler.step()
