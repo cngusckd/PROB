@@ -26,10 +26,255 @@ import datasets.samplers as samplers
 from datasets import build_dataset, get_coco_api_from_dataset
 from datasets.coco import make_coco_transforms
 from datasets.torchvision_datasets.open_world import OWDetection
-from engine import evaluate, train_one_epoch, get_exemplar_replay
+from engine import evaluate, get_exemplar_replay # train_one_epoch
+# from logging_test import train_one_epoch
 from models import build_model
+
 import wandb
 
+########################
+########################
+## NEW
+
+def custom_coco_transform(image_set, custom_scales, custom_max_size):
+    # args.custom_scales = [480, 512, 544, 576, 608, 640, 672, 704, 736, 768, 800]
+    # args.custom_max_size = 1333
+    import datasets.transforms as T
+    normalize = T.Compose([
+        T.ToTensor(),
+        T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    ])
+
+    # scales = [480, 512, 544, 576, 608, 640, 672, 704, 736, 768, 800]
+    scales = custom_scales
+    
+    t=[]
+    
+    if 'train' in image_set:
+        t.append(['train'])
+        t.append(T.Compose([
+            T.RandomHorizontalFlip(),
+            T.RandomSelect(
+                # T.RandomResize(scales, max_size=1333),
+                T.RandomResize(scales, max_size = custom_max_size),
+                T.Compose([
+                    T.RandomResize([400, 500, 600]),
+                    T.RandomSizeCrop(384, 600),
+                    # T.RandomResize(scales, max_size=1333),
+                    T.RandomResize(scales, max_size=custom_max_size),
+                ])
+            ),
+            normalize,
+        ]))
+        return t
+    
+    if 'ft' in image_set:
+        t.append(['ft'])
+        t.append(T.Compose([
+            T.RandomHorizontalFlip(),
+            T.RandomSelect(
+                # T.RandomResize(scales, max_size=1333),
+                T.RandomResize(scales, max_size=custom_max_size),
+                T.Compose([
+                    T.RandomResize([400, 500, 600]),
+                    T.RandomSizeCrop(384, 600),
+                    # T.RandomResize(scales, max_size=1333),
+                    T.RandomResize(scales, max_size=custom_max_size),
+                ])
+            ),
+            normalize,
+        ]))
+        return t
+    
+    if 'val' in image_set:
+        t.append(['val'])
+        t.append(T.Compose([
+            T.RandomResize([800], max_size=1333),
+            normalize,
+        ]))
+        return t
+
+    if 'test' in image_set:
+        t.append(['test'])
+        t.append(T.Compose([
+            T.RandomResize([800], max_size=1333),
+            normalize,
+        ]))
+        return t
+    
+from resource import getrusage, RUSAGE_CHILDREN, RUSAGE_SELF
+
+# CPU 메모리 측정
+def get_memory_mb():
+    """
+    Get the memory usage of the current process and its children.
+
+    Returns:
+        dict: A dictionary containing the memory usage of the current process and its children.
+
+        The dictionary has the following keys:
+            - self: The memory usage of the current process.
+            - children: The memory usage of the children of the current process.
+            - total: The total memory usage of the current process and its children.
+    """
+    res = {
+        "self": getrusage(RUSAGE_SELF).ru_maxrss / 1024,
+        "children": getrusage(RUSAGE_CHILDREN).ru_maxrss / 1024,
+        "total": getrusage(RUSAGE_SELF).ru_maxrss / 1024 + getrusage(RUSAGE_CHILDREN).ru_maxrss / 1024
+    }
+    return res
+
+from typing import Iterable
+from datasets.data_prefetcher import data_prefetcher
+
+
+import pynvml
+def get_my_gpu_memory_usage():
+    my_pid = os.getpid()
+    pynvml.nvmlInit()
+    usage_entries = []
+
+    for dev_id in range(pynvml.nvmlDeviceGetCount()):
+        handle = pynvml.nvmlDeviceGetHandleByIndex(dev_id)
+        try:
+            procs = pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
+        except pynvml.NVMLError:
+            continue
+
+        for proc in procs:
+            if proc.pid == my_pid:
+                mem_mb = proc.usedGpuMemory / (1024 * 1024)
+                usage_entries.append((dev_id, mem_mb))
+
+    pynvml.nvmlShutdown()
+
+    return usage_entries
+import math
+import sys
+from copy import deepcopy
+def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
+                    data_loader: Iterable, optimizer: torch.optim.Optimizer,
+                    device: torch.device, epoch: int, nc_epoch: int, max_norm: float = 0, wandb: object = None):
+    
+    model.train()
+    criterion.train()
+    metric_logger = utils.MetricLogger(delimiter="  ")
+    metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
+    metric_logger.add_meter('class_error', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
+    metric_logger.add_meter('grad_norm', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
+    header = 'Epoch: [{}]'.format(epoch)
+    print_freq = 10
+    prefetcher = data_prefetcher(data_loader, device, prefetch=True)
+    samples, targets = prefetcher.next()
+
+    for _idx, _ in enumerate(metric_logger.log_every(range(len(data_loader)), print_freq, header)):
+        outputs = model(samples)
+        after_forward_cpu_usage = get_memory_mb()['total']
+        after_forward_gpu_usage = get_my_gpu_memory_usage()[0][1]
+        after_forward_gpu_allocated = torch.cuda.memory_allocated(device)
+        loss_dict = criterion(outputs, targets) 
+        weight_dict = deepcopy(criterion.weight_dict)
+        
+        ## condition for starting nc loss computation after certain epoch so that the F_cls branch has the time
+        ## to learn the within classes seperation.
+        if epoch < nc_epoch: 
+            for k,v in weight_dict.items():
+                if 'NC' in k:
+                    weight_dict[k] = 0
+         
+        losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
+        # reduce losses over all GPUs for logging purposes
+
+        loss_dict_reduced = utils.reduce_dict(loss_dict)
+        ## Just printing NOt affectin gin loss function
+        loss_dict_reduced_unscaled = {f'{k}_unscaled': v
+                                      for k, v in loss_dict_reduced.items()}
+        loss_dict_reduced_scaled = {k: v * weight_dict[k]
+                                    for k, v in loss_dict_reduced.items() if k in weight_dict}
+        losses_reduced_scaled = sum(loss_dict_reduced_scaled.values())
+ 
+        loss_value = losses_reduced_scaled.item()
+ 
+        if not math.isfinite(loss_value):
+            print("Loss is {}, stopping training".format(loss_value))
+            print(loss_dict_reduced)
+            sys.exit(1)
+ 
+        optimizer.zero_grad()
+        losses.backward()
+        after_backward_cpu_usage = get_memory_mb()
+        after_backward_gpu_usage = get_my_gpu_memory_usage()[0][1]
+        after_backward_gpu_allocated = torch.cuda.memory_allocated(device)
+        
+        if max_norm > 0:
+            grad_total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+        else:
+            grad_total_norm = utils.get_total_grad_norm(model.parameters(), max_norm)
+        optimizer.step()
+
+        wandb.log({
+            "After Forward CPU Usage" : after_forward_cpu_usage,
+            'After Forward GPU(with pynvml) Usage' : float(f"{after_forward_gpu_usage}"),
+            "After Forward GPU(with torch.cuda.memory_allocated()) Usage" : float(f"{after_forward_gpu_allocated / 1024 ** 2:.2f}"),
+            "After Backward CPU Usage" : after_backward_cpu_usage,
+            "After Backward GPU(with pynvml) Usage" : float(f"{after_backward_gpu_usage}"),
+            "After Backward GPU(with torch.cuda.memory_allocated()) Usage" : float(f"{after_backward_gpu_allocated / 1024 ** 2:.2f}")
+        })
+
+        '''
+
+        # 다 MB 단위
+        cpu_res = get_memory_mb()['total']
+        gpu_memory_history.append(print_gpu_utilization())
+        # 현재 디바이스 설정
+        device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+
+        # 현재 할당된 메모리 (바이트 단위)
+        allocated = torch.cuda.memory_allocated(device)
+
+        # 현재 예약된 메모리 (바이트 단위)
+        reserved = torch.cuda.memory_reserved(device)
+
+        # 최대 할당된 메모리 (바이트 단위)
+        max_allocated = torch.cuda.max_memory_allocated(device)
+
+        # 최대 예약된 메모리 (바이트 단위)
+        max_reserved = torch.cuda.max_memory_reserved(device)
+        print("Used CPU memory : ", cpu_res, ' MB')
+
+        wandb.log({
+            "Used CPU memory" : cpu_res,
+            'Allocated GPU memory' : float(f"{allocated / 1024 ** 2:.2f}"),
+            "Reserved GPU memory" : float(f"{reserved / 1024 ** 2:.2f}"),
+            "MAX Allocated GPU memory" : float(f"{max_allocated / 1024 ** 2:.2f}"),
+            "MAX Reserved GPU memory" : float(f"{max_reserved / 1024 ** 2:.2f}"),
+            "gpustat GPU memory" : float(gpu_memory_history[-1]) 
+        })
+        '''
+        if wandb is not None:
+            wandb.log({"total_loss":loss_value})
+            wandb.log(loss_dict_reduced_scaled)
+            wandb.log(loss_dict_reduced_unscaled)
+        metric_logger.update(loss=loss_value, **loss_dict_reduced_scaled, **loss_dict_reduced_unscaled)
+        metric_logger.update(class_error=loss_dict_reduced['class_error'])
+        metric_logger.update(lr=optimizer.param_groups[0]["lr"])
+        metric_logger.update(grad_norm=grad_total_norm)
+        
+        
+        samples, targets = prefetcher.next()
+
+
+        if _idx == 10 :
+            # gpu_memory_history = np.array(gpu_memory_history)
+            # print('평균 사용량', np.mean(gpu_memory_history))
+            # print('최대 사용량', np.max(gpu_memory_history))
+            # print('최소 사용량', np.min(gpu_memory_history))
+            break
+
+    # gather the stats from all processes
+    metric_logger.synchronize_between_processes()
+    print("Averaged stats:", metric_logger)
+    return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
 
 def get_args_parser():
@@ -157,14 +402,27 @@ def get_args_parser():
     parser.add_argument('--exemplar_replay_prev_file', default='', type=str, help="path to previous ft file")
     parser.add_argument('--exemplar_replay_cur_file', default='', type=str, help="path to current ft file")
     parser.add_argument('--exemplar_replay_random', default=False, action='store_true', help='make selection random')
+    
+    # CUSTOM
+    parser.add_argument('--custom_scales', default=[480, 512, 544, 576, 608, 640, 672, 704, 736, 768, 800], type=list, help="path to current ft file")
+    parser.add_argument('--custom_max_size', default=1333, type=int, help="path to current ft file")
+    # parser.add_argument('--custom_scales', default = [480, 512, 544, 576, 608, 640], type=list, help="path to current ft file")
+    # parser.add_argument('--custom_max_size', default = 1080, type=int, help="path to current ft file")
+    
     return parser
 
 def main(args):
+    ###
+    args.distributed = False
+    ###
+    import wandb
     if len(args.wandb_project)>0:
         if len(args.wandb_name)>0:
-            wandb.init(project=args.wandb_project, entity="marvl", group=args.wandb_name)
+            wandb.init(project=args.wandb_project, group=args.wandb_name)
+            # wandb.init(project=args.wandb_project, entity="cngusckd", group=args.wandb_name)
         else:
-            wandb.init(project=args.wandb_project, entity="marvl")
+            wandb.init(project=args.wandb_project)
+            # wandb.init(project=args.wandb_project, entity="cngusckd")
         wandb.config = args
     else:
         wandb=None
@@ -212,6 +470,8 @@ def main(args):
     data_loader_val = DataLoader(dataset_val, args.batch_size, sampler=sampler_val,
                                  drop_last=False, collate_fn=utils.collate_fn, num_workers=args.num_workers,
                                  pin_memory=True)
+    
+    
 
     # lr_backbone_names = ["backbone.0", "backbone.neck", "input_proj", "transformer.encoder"]
     def match_name_keywords(n, name_keywords):
@@ -396,8 +656,8 @@ def get_datasets(args):
 
     train_set = args.train_set
     test_set = args.test_set
-    dataset_train = OWDetection(args, args.data_root, image_set=args.train_set, transforms=make_coco_transforms(args.train_set), dataset = args.dataset)
-    dataset_val = OWDetection(args, args.data_root, image_set=args.test_set, dataset = args.dataset, transforms=make_coco_transforms(args.test_set))
+    dataset_train = OWDetection(args, args.data_root, image_set=args.train_set, transforms=custom_coco_transform(args.train_set, args.custom_scales, args.custom_max_size), dataset = args.dataset)
+    dataset_val = OWDetection(args, args.data_root, image_set=args.test_set, dataset = args.dataset, transforms=custom_coco_transform(args.test_set, args.custom_scales, args.custom_max_size))
 
     print(args.train_set)
     print(args.test_set)

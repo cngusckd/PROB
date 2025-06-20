@@ -308,7 +308,7 @@ class OWDetection(VisionDataset):
         return img, target
 
     def __len__(self):
-        return len(self.images)
+        return len(self.annotations)
 
     def parse_voc_xml(self, node):
         voc_dict = {}

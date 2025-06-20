@@ -7,7 +7,7 @@ import time
 import json
 import math
 import os
-os.environ["CUDA_VISIBLE_DEVICES"]= "0"
+os.environ["CUDA_VISIBLE_DEVICES"]= "1"
 #GPU process인식을 위한 작업
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import sys
@@ -46,46 +46,120 @@ from main_open_world import get_args_parser
 import pynvml , pandas as pd
 import psutil
 
+# def get_my_gpu_memory_usage():
+#     pynvml.nvmlInit()
+#     result = []
+#     print('os.getpid : ', os.getpid())
+#     print('pustil.process : ', psutil.Process(os.getpid()).ppid())
+#     for dev_id in range(pynvml.nvmlDeviceGetCount()):
+#         handle = pynvml.nvmlDeviceGetHandleByIndex(dev_id)
+#         for proc in pynvml.nvmlDeviceGetComputeRunningProcesses(handle):
+#             print(proc.pid, proc.usedGpuMemory, dev_id)
+#             result.append([proc.pid, proc.usedGpuMemory, dev_id])
+#     gpu_usage = pd.DataFrame(result,columns=["pid","bytes of memory", "device"])
+#     gpu_usage["MB of memory"] = gpu_usage["bytes of memory"] / (1024*1024)
+#     gpu_usage["GB of memory"] = gpu_usage["bytes of memory"] / (1024*1024*1024)
+
+#     gpu_usage_by_id_r = gpu_usage.groupby("pid").apply(lambda x : ", ".join([str(i) for i in x["device"].tolist()])).reset_index(drop=False)
+#     gpu_usage_by_id_r.columns = ["pid","device_list"]
+#     gpu_usage_by_id_l = gpu_usage.groupby("pid").agg({"MB of memory" : "sum","GB of memory" : "sum",}).reset_index(drop=False)
+#     gpu_usage_by_id = gpu_usage_by_id_l.merge(gpu_usage_by_id_r,on="pid",how="left")
+
+#     print("▶ GPU Memory Usage (PID : MB)")
+#     for pid, mem in gpu_usage.groupby("pid")["MB of memory"].sum().items():
+#         mark = "<- current" if pid == os.getpid() else ""
+#         print(f"{pid} : {mem:.2f} MB {mark}")
+
+#     print('os.getpid : ', os.getpid())
+#     print('pustil.process : ', psutil.Process(os.getpid()).ppid())
+#     return gpu_usage["MB of memory"], gpu_usage_by_id
+
+def custom_coco_transform(image_set, custom_scales, custom_max_size):
+    # args.custom_scales = [480, 512, 544, 576, 608, 640, 672, 704, 736, 768, 800]
+    # args.custom_max_size = 1333
+    import datasets.transforms as T
+    normalize = T.Compose([
+        T.ToTensor(),
+        T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    ])
+
+    # scales = [480, 512, 544, 576, 608, 640, 672, 704, 736, 768, 800]
+    scales = custom_scales
+    
+    t=[]
+    
+    if 'train' in image_set:
+        t.append(['train'])
+        t.append(T.Compose([
+            T.RandomHorizontalFlip(),
+            T.RandomSelect(
+                # T.RandomResize(scales, max_size=1333),
+                T.RandomResize(scales, max_size = custom_max_size),
+                T.Compose([
+                    T.RandomResize([400, 500, 600]),
+                    T.RandomSizeCrop(384, 600),
+                    # T.RandomResize(scales, max_size=1333),
+                    T.RandomResize(scales, max_size=custom_max_size),
+                ])
+            ),
+            normalize,
+        ]))
+        return t
+    
+    if 'ft' in image_set:
+        t.append(['ft'])
+        t.append(T.Compose([
+            T.RandomHorizontalFlip(),
+            T.RandomSelect(
+                # T.RandomResize(scales, max_size=1333),
+                T.RandomResize(scales, max_size=custom_max_size),
+                T.Compose([
+                    T.RandomResize([400, 500, 600]),
+                    T.RandomSizeCrop(384, 600),
+                    # T.RandomResize(scales, max_size=1333),
+                    T.RandomResize(scales, max_size=custom_max_size),
+                ])
+            ),
+            normalize,
+        ]))
+        return t
+
+
 def get_my_gpu_memory_usage():
+    my_pid = os.getpid()
     pynvml.nvmlInit()
-    result = []
-    print('os.getpid : ', os.getpid())
-    print('pustil.process : ', psutil.Process(os.getpid()).ppid())
+    usage_entries = []
+
     for dev_id in range(pynvml.nvmlDeviceGetCount()):
         handle = pynvml.nvmlDeviceGetHandleByIndex(dev_id)
-        for proc in pynvml.nvmlDeviceGetComputeRunningProcesses(handle):
-            print(proc.pid, proc.usedGpuMemory, dev_id)
-            result.append([proc.pid, proc.usedGpuMemory, dev_id])
-    gpu_usage = pd.DataFrame(result,columns=["pid","bytes of memory", "device"])
-    gpu_usage["MB of memory"] = gpu_usage["bytes of memory"] / (1024*1024)
-    gpu_usage["GB of memory"] = gpu_usage["bytes of memory"] / (1024*1024*1024)
+        try:
+            procs = pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
+        except pynvml.NVMLError:
+            continue
 
-    gpu_usage_by_id_r = gpu_usage.groupby("pid").apply(lambda x : ", ".join([str(i) for i in x["device"].tolist()])).reset_index(drop=False)
-    gpu_usage_by_id_r.columns = ["pid","device_list"]
-    gpu_usage_by_id_l = gpu_usage.groupby("pid").agg({"MB of memory" : "sum","GB of memory" : "sum",}).reset_index(drop=False)
-    gpu_usage_by_id = gpu_usage_by_id_l.merge(gpu_usage_by_id_r,on="pid",how="left")
+        for proc in procs:
+            if proc.pid == my_pid:
+                mem_mb = proc.usedGpuMemory / (1024 * 1024)
+                usage_entries.append((dev_id, mem_mb))
 
-    print("▶ GPU Memory Usage (PID : MB)")
-    for pid, mem in gpu_usage.groupby("pid")["MB of memory"].sum().items():
-        mark = "<- current" if pid == os.getpid() else ""
-        print(f"{pid} : {mem:.2f} MB {mark}")
+    pynvml.nvmlShutdown()
 
-    print('os.getpid : ', os.getpid())
-    print('pustil.process : ', psutil.Process(os.getpid()).ppid())
-    return gpu_usage["MB of memory"], gpu_usage_by_id
+    return usage_entries
 
 def config_init():
     parser = argparse.ArgumentParser('PROB_LOGGING script', parents=[get_args_parser()])
     args = parser.parse_args(args = []) # args = [] : fix the error https://chaeso-coding.tistory.com/113
-    args.epochs = 1
+    args.epochs = 30
     args.batch_size = 1
     args.distributed = False
+    args.custom_scales = [480, 512, 544, 576, 608, 640, 672, 704, 736, 768, 800]
+    args.custom_max_size = 1333
+
 
     #########################
     #########################
-    print('default : ', args.num_feature_levels )
-    args.num_feature_levels  = 4
-    print('changed : ', args.num_feature_levels )
+    # args.num_queries = 25
+
     #########################
     #########################
 
@@ -95,12 +169,14 @@ def config_init():
         config = args
     )
 
-    wandb.run.name = 'python_file_test'
+    wandb.run.name = 'Python_File_CUSTOM_DATA_AUG'
     wandb.run.save()
 
     seed = args.seed
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
     np.random.seed(seed)
     random.seed(seed)
 
@@ -137,8 +213,10 @@ def get_datasets(args):
 
     train_set = args.train_set
     test_set = args.test_set
-    dataset_train = OWDetection(args, args.data_root, image_set=args.train_set, transforms=make_coco_transforms(args.train_set), dataset = args.dataset)
-    dataset_val = OWDetection(args, args.data_root, image_set=args.test_set, dataset = args.dataset, transforms=make_coco_transforms(args.test_set))
+    # dataset_train = OWDetection(args, args.data_root, image_set=args.train_set, transforms=make_coco_transforms(args.train_set), dataset = args.dataset)
+    # dataset_val = OWDetection(args, args.data_root, image_set=args.test_set, dataset = args.dataset, transforms=make_coco_transforms(args.test_set))
+    dataset_train = OWDetection(args, args.data_root, image_set=args.train_set, transforms=custom_coco_transform(args.train_set, args.custom_scales, args.custom_max_size), dataset = args.dataset)
+    dataset_val = OWDetection(args, args.data_root, image_set=args.test_set, dataset = args.dataset, transforms=custom_coco_transform(args.test_set, args.custom_scales, args.custom_max_size))
 
     print(args.train_set)
     print(args.test_set)
@@ -179,8 +257,6 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, nc_epoch: int, max_norm: float = 0, wandb: object = None):
     
-    gpu_memory_history = []
-    
     model.train()
     criterion.train()
     metric_logger = utils.MetricLogger(delimiter="  ")
@@ -193,8 +269,10 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     samples, targets = prefetcher.next()
 
     for _idx, _ in enumerate(metric_logger.log_every(range(len(data_loader)), print_freq, header)):
-        get_my_gpu_memory_usage()
         outputs = model(samples)
+        after_forward_cpu_usage = get_memory_mb()['total']
+        after_forward_gpu_usage = get_my_gpu_memory_usage()[0][1]
+        after_forward_gpu_allocated = torch.cuda.memory_allocated(device)
         loss_dict = criterion(outputs, targets) 
         weight_dict = deepcopy(criterion.weight_dict)
         
@@ -225,12 +303,24 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
  
         optimizer.zero_grad()
         losses.backward()
+        after_backward_cpu_usage = get_memory_mb()
+        after_backward_gpu_usage = get_my_gpu_memory_usage()[0][1]
+        after_backward_gpu_allocated = torch.cuda.memory_allocated(device)
         
         if max_norm > 0:
             grad_total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
         else:
             grad_total_norm = utils.get_total_grad_norm(model.parameters(), max_norm)
         optimizer.step()
+
+        wandb.log({
+            "After Forward CPU Usage" : after_forward_cpu_usage,
+            'After Forward GPU(with pynvml) Usage' : float(f"{after_forward_gpu_usage}"),
+            "After Forward GPU(with torch.cuda.memory_allocated()) Usage" : float(f"{after_forward_gpu_allocated / 1024 ** 2:.2f}"),
+            "After Backward CPU Usage" : after_backward_cpu_usage,
+            "After Backward GPU(with pynvml) Usage" : float(f"{after_backward_gpu_usage}"),
+            "After Backward GPU(with torch.cuda.memory_allocated()) Usage" : float(f"{after_backward_gpu_allocated / 1024 ** 2:.2f}")
+        })
 
         '''
 
@@ -261,12 +351,11 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             "MAX Reserved GPU memory" : float(f"{max_reserved / 1024 ** 2:.2f}"),
             "gpustat GPU memory" : float(gpu_memory_history[-1]) 
         })
-        
-        # if wandb is not None:
-        #     wandb.log({"total_loss":loss_value})
-        #     wandb.log(loss_dict_reduced_scaled)
-        #     wandb.log(loss_dict_reduced_unscaled)
         '''
+        if wandb is not None:
+            wandb.log({"total_loss":loss_value})
+            wandb.log(loss_dict_reduced_scaled)
+            wandb.log(loss_dict_reduced_unscaled)
         metric_logger.update(loss=loss_value, **loss_dict_reduced_scaled, **loss_dict_reduced_unscaled)
         metric_logger.update(class_error=loss_dict_reduced['class_error'])
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
@@ -276,12 +365,12 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         samples, targets = prefetcher.next()
 
 
-        if _idx == 100 :
-            gpu_memory_history = np.array(gpu_memory_history)
-            print('평균 사용량', np.mean(gpu_memory_history))
-            print('최대 사용량', np.max(gpu_memory_history))
-            print('최소 사용량', np.min(gpu_memory_history))
-            break
+        # if _idx == 50000 :
+        #     # gpu_memory_history = np.array(gpu_memory_history)
+        #     # print('평균 사용량', np.mean(gpu_memory_history))
+        #     # print('최대 사용량', np.max(gpu_memory_history))
+        #     # print('최소 사용량', np.min(gpu_memory_history))
+        #     break
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
