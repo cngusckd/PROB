@@ -1,6 +1,8 @@
 /CLAD_PROB_FORMAT
+/data
 /data/OWOD
 /wandb
+/exps/MOWODB
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

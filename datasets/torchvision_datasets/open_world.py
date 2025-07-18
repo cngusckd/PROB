@@ -96,9 +96,14 @@ T4_CLASS_NAMES = [
     "vase", "scissors", "teddy bear", "hair drier", "toothbrush",
     "wine glass", "cup", "fork", "knife", "spoon", "bowl"
 ]
+
+CLAD_CLASS_NAMES = [
+    'Car', 'Truck', 'Tram', 'Cyclist', 'Tricycle', 'Pedestrian'
+]
+
 VOC_COCO_CLASS_NAMES["TOWOD"] = tuple(itertools.chain(VOC_CLASS_NAMES, T2_CLASS_NAMES, T3_CLASS_NAMES, T4_CLASS_NAMES, UNK_CLASS))
 VOC_COCO_CLASS_NAMES["VOC2007"] = tuple(itertools.chain(VOC_CLASS_NAMES, T2_CLASS_NAMES, T3_CLASS_NAMES, T4_CLASS_NAMES, UNK_CLASS))
-
+VOC_COCO_CLASS_NAMES['CLAD'] = tuple(itertools.chain(CLAD_CLASS_NAMES, UNK_CLASS))
 
 print(VOC_COCO_CLASS_NAMES)
 
@@ -189,6 +194,9 @@ class OWDetection(VisionDataset):
                                                                                    self.annotations, self.imgids])
         assert (len(self.images) == len(self.annotations) == len(self.imgids))
 
+        self._remove_empty_images()
+        
+
     @staticmethod
     def convert_image_id(img_id, to_integer=False, to_string=False, prefix='2021'):
         if to_integer:
@@ -232,6 +240,25 @@ class OWDetection(VisionDataset):
         with open(os.path.join(split_f), "r") as f:
             file_names = [x.strip() for x in f.readlines()]
         return file_names
+
+    ### CLAD
+    def _remove_empty_images(self):
+        """
+        Required because torchvision models can't handle empty lists for bbox in targets
+        """
+        # Filter only the indices with non-empty instances
+        non_empty_data = [
+            (img_set, img, imgid, ann) for img_set, img, imgid, ann in zip(self.image_set, self.images, self.imgids, self.annotations) 
+            if len(self.load_instances(imgid)[1]) > 0
+        ]
+        # Unzip and reassign the filtered data
+        if non_empty_data:
+            self.image_set, self.images, self.imgids, self.annotations = zip(*non_empty_data)
+            self.image_set, self.images, self.imgids, self.annotations = list(self.image_set), list(self.images), list(self.imgids), list(self.annotations)
+            assert len(self.images) == len(self.imgids) == len(self.annotations)
+        else:
+            # Handle the case where all images are empty
+            self.image_set, self.images, self.imgids, self.annotations = [], [], []
 
     ### OWOD
     def remove_prev_class_and_unk_instances(self, target):
@@ -308,7 +335,7 @@ class OWDetection(VisionDataset):
         return img, target
 
     def __len__(self):
-        return len(self.annotations)
+        return len(self.images)
 
     def parse_voc_xml(self, node):
         voc_dict = {}

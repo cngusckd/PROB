@@ -89,7 +89,7 @@ def custom_coco_transform(image_set, custom_scales, custom_max_size):
     if 'val' in image_set:
         t.append(['val'])
         t.append(T.Compose([
-            T.RandomResize([800], max_size=1333),
+            T.RandomResize([800], max_size=custom_max_size),
             normalize,
         ]))
         return t
@@ -97,10 +97,11 @@ def custom_coco_transform(image_set, custom_scales, custom_max_size):
     if 'test' in image_set:
         t.append(['test'])
         t.append(T.Compose([
-            T.RandomResize([800], max_size=1333),
+            T.RandomResize([800], max_size=custom_max_size),
             normalize,
         ]))
         return t
+    raise ValueError(f'unknown {image_set}')
     
 from resource import getrusage, RUSAGE_CHILDREN, RUSAGE_SELF
 
@@ -264,12 +265,12 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         samples, targets = prefetcher.next()
 
 
-        if _idx == 10 :
-            # gpu_memory_history = np.array(gpu_memory_history)
-            # print('평균 사용량', np.mean(gpu_memory_history))
-            # print('최대 사용량', np.max(gpu_memory_history))
-            # print('최소 사용량', np.min(gpu_memory_history))
-            break
+        # if _idx == 10 :
+        #     # gpu_memory_history = np.array(gpu_memory_history)
+        #     # print('평균 사용량', np.mean(gpu_memory_history))
+        #     # print('최대 사용량', np.max(gpu_memory_history))
+        #     # print('최소 사용량', np.min(gpu_memory_history))
+        #     break
 
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
@@ -315,9 +316,13 @@ def get_args_parser():
                         help="Number of encoding layers in the transformer")
     parser.add_argument('--dec_layers', default=6, type=int,
                         help="Number of decoding layers in the transformer")
-    parser.add_argument('--dim_feedforward', default=1024, type=int,
+    # parser.add_argument('--dim_feedforward', default=1024, type=int,
+                        # help="Intermediate size of the feedforward layers in the transformer blocks")
+    parser.add_argument('--dim_feedforward', default=512, type=int,
                         help="Intermediate size of the feedforward layers in the transformer blocks")
-    parser.add_argument('--hidden_dim', default=256, type=int,
+    # parser.add_argument('--hidden_dim', default=256, type=int,
+                        # help="Size of the embeddings (dimension of the transformer)")
+    parser.add_argument('--hidden_dim', default=128, type=int,
                         help="Size of the embeddings (dimension of the transformer)")
     parser.add_argument('--dropout', default=0.1, type=float,
                         help="Dropout applied in the transformer")
@@ -357,7 +362,7 @@ def get_args_parser():
                         help='start epoch')
     parser.add_argument('--eval', action='store_true')
     parser.add_argument('--viz', action='store_true')
-    parser.add_argument('--eval_every', default=5, type=int)
+    parser.add_argument('--eval_every', default=3, type=int)
     parser.add_argument('--num_workers', default=3, type=int)
     parser.add_argument('--cache_mode', default=False, action='store_true', help='whether to cache images on memory')
     
@@ -377,7 +382,8 @@ def get_args_parser():
     parser.add_argument('--num_classes', default=81, type=int)
     parser.add_argument('--nc_epoch', default=0, type=int)
     parser.add_argument('--dataset', default='OWDETR', help='defines which dataset is used. Built for: {TOWOD, OWDETR, VOC2007}')
-    parser.add_argument('--data_root', default='./data/OWOD', type=str)
+    parser.add_argument('--data_root', default='../data/CLAD_PROB_FORMAT/data/OWOD', type=str)
+    # parser.add_argument('--data_root', default='./data/OWOD', type=str)
     parser.add_argument('--unk_conf_w', default=1.0, type=float)
 
     ################ PROB OWOD ################
@@ -406,9 +412,10 @@ def get_args_parser():
     # CUSTOM
     parser.add_argument('--custom_scales', default=[480, 512, 544, 576, 608, 640, 672, 704, 736, 768, 800], type=list, help="path to current ft file")
     parser.add_argument('--custom_max_size', default=1333, type=int, help="path to current ft file")
-    # parser.add_argument('--custom_scales', default = [480, 512, 544, 576, 608, 640], type=list, help="path to current ft file")
-    # parser.add_argument('--custom_max_size', default = 1080, type=int, help="path to current ft file")
     
+    # parser.add_argument('--custom_scales', default=[480, 512, 544, 576, 608, 640], type=list, help="path to current ft file")
+    # parser.add_argument('--custom_max_size', default=1080, type=int, help="path to current ft file")
+
     return parser
 
 def main(args):
@@ -418,14 +425,16 @@ def main(args):
     import wandb
     if len(args.wandb_project)>0:
         if len(args.wandb_name)>0:
-            wandb.init(project=args.wandb_project, group=args.wandb_name)
+            wandb.init(project=args.wandb_project, group=args.wandb_name, config = vars(args))
             # wandb.init(project=args.wandb_project, entity="cngusckd", group=args.wandb_name)
         else:
-            wandb.init(project=args.wandb_project)
+            wandb.init(project=args.wandb_project, config = vars(args))
             # wandb.init(project=args.wandb_project, entity="cngusckd")
         wandb.config = args
     else:
         wandb=None
+    wandb.run.name = args.wandb_name
+    wandb.run.save()
 
     utils.init_distributed_mode(args)
     print("git:\n  {}\n".format(utils.get_sha()))

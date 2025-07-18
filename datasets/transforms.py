@@ -73,7 +73,6 @@ def hflip(image, target):
         boxes = target["boxes"]
         boxes = boxes[:, [2, 1, 0, 3]] * torch.as_tensor([-1, 1, -1, 1]) + torch.as_tensor([w, 0, w, 0])
         target["boxes"] = boxes
-
     if "masks" in target:
         target['masks'] = target['masks'].flip(-1)
 
