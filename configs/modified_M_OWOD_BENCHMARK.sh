@@ -4,10 +4,10 @@ echo running training of prob-detr, CLAD dataset
 
 set -x
 
-EXP_DIR=exps/MOWODB/CLAD2
+EXP_DIR=exps/MOWODB/CLAD3
 PY_ARGS=${@:1}
-PORJECT_NAME=TEST
-WANDB_NAME=CLAD_TEST
+PORJECT_NAME=PROB_CHU
+WANDB_NAME=CLAD_FIX_3
 REPLAY_NAME=learned_clad
 BATCH_SIZE=1
 

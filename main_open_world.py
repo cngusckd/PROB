@@ -321,9 +321,13 @@ def get_args_parser():
     parser.add_argument('--num_feature_levels', default=4, type=int, help='number of feature levels')
 
     # * Transformer
-    parser.add_argument('--enc_layers', default=6, type=int,
+    # parser.add_argument('--enc_layers', default=6, type=int,
+    #                     help="Number of encoding layers in the transformer")
+    # parser.add_argument('--dec_layers', default=6, type=int,
+    #                     help="Number of decoding layers in the transformer")
+    parser.add_argument('--enc_layers', default = 4, type=int,
                         help="Number of encoding layers in the transformer")
-    parser.add_argument('--dec_layers', default=6, type=int,
+    parser.add_argument('--dec_layers', default = 4, type=int,
                         help="Number of decoding layers in the transformer")
     # parser.add_argument('--dim_feedforward', default=1024, type=int,
                         # help="Intermediate size of the feedforward layers in the transformer blocks")
@@ -333,7 +337,9 @@ def get_args_parser():
                         # help="Size of the embeddings (dimension of the transformer)")
     parser.add_argument('--hidden_dim', default=64, type=int,
                         help="Size of the embeddings (dimension of the transformer)")
-    parser.add_argument('--dropout', default=0.1, type=float,
+    # parser.add_argument('--dropout', default=0.1, type=float,
+    #                     help="Dropout applied in the transformer")
+    parser.add_argument('--dropout', default=0.2, type=float,
                         help="Dropout applied in the transformer")
     parser.add_argument('--nheads', default=8, type=int,
                         help="Number of attention heads inside the transformer's attentions")
@@ -371,8 +377,8 @@ def get_args_parser():
                         help='start epoch')
     parser.add_argument('--eval', action='store_true')
     parser.add_argument('--viz', action='store_true')
-    parser.add_argument('--eval_every', default=3, type=int)
-    parser.add_argument('--num_workers', default=3, type=int)
+    parser.add_argument('--eval_every', default=1, type=int)
+    parser.add_argument('--num_workers', default=4, type=int)
     parser.add_argument('--cache_mode', default=False, action='store_true', help='whether to cache images on memory')
     
     ################ OW-DETR ################
