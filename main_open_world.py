@@ -173,6 +173,9 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         after_forward_cpu_usage = get_memory_mb()['total']
         after_forward_gpu_usage = get_my_gpu_memory_usage()[0][1]
         after_forward_gpu_allocated = torch.cuda.memory_allocated(device)
+        after_forward_gpu_reserved = torch.cuda.memory_reserved(device)
+        after_forward_gpu_max_allocated = torch.cuda.max_memory_allocated(device)
+        
         loss_dict = criterion(outputs, targets) 
         weight_dict = deepcopy(criterion.weight_dict)
         
@@ -206,6 +209,8 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         after_backward_cpu_usage = get_memory_mb()
         after_backward_gpu_usage = get_my_gpu_memory_usage()[0][1]
         after_backward_gpu_allocated = torch.cuda.memory_allocated(device)
+        after_backward_gpu_reserved = torch.cuda.memory_reserved(device)
+        after_backward_gpu_max_allocated = torch.cuda.max_memory_allocated(device)
         
         if max_norm > 0:
             grad_total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
@@ -217,9 +222,13 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             "After Forward CPU Usage" : after_forward_cpu_usage,
             'After Forward GPU(with pynvml) Usage' : float(f"{after_forward_gpu_usage}"),
             "After Forward GPU(with torch.cuda.memory_allocated()) Usage" : float(f"{after_forward_gpu_allocated / 1024 ** 2:.2f}"),
+            "After Forward GPU(with torch.cuda.memory_reserved()) Usage" : float(f"{after_forward_gpu_reserved / 1024 ** 2:.2f}"),
+            "After Forward GPU(with torch.cuda.max_memory_allocated()) Usage" : float(f"{after_forward_gpu_max_allocated / 1024 ** 2:.2f}"),
             "After Backward CPU Usage" : after_backward_cpu_usage,
             "After Backward GPU(with pynvml) Usage" : float(f"{after_backward_gpu_usage}"),
-            "After Backward GPU(with torch.cuda.memory_allocated()) Usage" : float(f"{after_backward_gpu_allocated / 1024 ** 2:.2f}")
+            "After Backward GPU(with torch.cuda.memory_allocated()) Usage" : float(f"{after_backward_gpu_allocated / 1024 ** 2:.2f}"),
+            "After Forward GPU(with torch.cuda.memory_reserved()) Usage" : float(f"{after_backward_gpu_reserved / 1024 ** 2:.2f}"),
+            "After Forward GPU(with torch.cuda.max_memory_allocated()) Usage" : float(f"{after_backward_gpu_max_allocated / 1024 ** 2:.2f}"),
         })
 
         '''
@@ -318,11 +327,11 @@ def get_args_parser():
                         help="Number of decoding layers in the transformer")
     # parser.add_argument('--dim_feedforward', default=1024, type=int,
                         # help="Intermediate size of the feedforward layers in the transformer blocks")
-    parser.add_argument('--dim_feedforward', default=512, type=int,
+    parser.add_argument('--dim_feedforward', default=256, type=int,
                         help="Intermediate size of the feedforward layers in the transformer blocks")
     # parser.add_argument('--hidden_dim', default=256, type=int,
                         # help="Size of the embeddings (dimension of the transformer)")
-    parser.add_argument('--hidden_dim', default=128, type=int,
+    parser.add_argument('--hidden_dim', default=64, type=int,
                         help="Size of the embeddings (dimension of the transformer)")
     parser.add_argument('--dropout', default=0.1, type=float,
                         help="Dropout applied in the transformer")
