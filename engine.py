@@ -25,6 +25,7 @@ from util.box_ops import box_xyxy_to_cxcywh, box_cxcywh_to_xyxy
 from util.plot_utils import plot_prediction
 import matplotlib.pyplot as plt
 from copy import deepcopy
+import pdb
 
 
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
@@ -36,13 +37,22 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     metric_logger.add_meter('class_error', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
     metric_logger.add_meter('grad_norm', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
+
+    metric_logger.add_meter('mem_fwd_b', utils.SmoothedValue(window_size=1, fmt='{value:.0f}MB'))
+    metric_logger.add_meter('mem_fwd_a', utils.SmoothedValue(window_size=1, fmt='{value:.0f}MB'))
+    metric_logger.add_meter('mem_bwd_b', utils.SmoothedValue(window_size=1, fmt='{value:.0f}MB'))
+    metric_logger.add_meter('mem_bwd_a', utils.SmoothedValue(window_size=1, fmt='{value:.0f}MB'))
     header = 'Epoch: [{}]'.format(epoch)
     print_freq = 10
     prefetcher = data_prefetcher(data_loader, device, prefetch=True)
     samples, targets = prefetcher.next()
 
     for _ in metric_logger.log_every(range(len(data_loader)), print_freq, header):
+        mem_before_fwd = torch.cuda.memory_allocated() / 1024**2
+        # pdb.set_trace()
         outputs = model(samples)
+        mem_after_fwd = torch.cuda.memory_allocated() / 1024**2
+        # pdb.set_trace()
         loss_dict = criterion(outputs, targets) 
         weight_dict = deepcopy(criterion.weight_dict)
         
@@ -72,7 +82,11 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             sys.exit(1)
  
         optimizer.zero_grad()
+        mem_before_bwd = torch.cuda.memory_allocated() / 1024**2
+        # pdb.set_trace()
         losses.backward()
+        mem_after_bwd = torch.cuda.memory_allocated() / 1024**2
+        # pdb.set_trace()
         if max_norm > 0:
             grad_total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
         else:
@@ -83,12 +97,23 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             wandb.log({"total_loss":loss_value})
             wandb.log(loss_dict_reduced_scaled)
             wandb.log(loss_dict_reduced_unscaled)
+            wandb.log({
+                "mem_fwd_b": mem_before_fwd,
+                "mem_fwd_a": mem_after_fwd,
+                "mem_bwd_b": mem_before_bwd,
+                "mem_bwd_a": mem_after_bwd,
+            })
  
         metric_logger.update(loss=loss_value, **loss_dict_reduced_scaled, **loss_dict_reduced_unscaled)
         metric_logger.update(class_error=loss_dict_reduced['class_error'])
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
         metric_logger.update(grad_norm=grad_total_norm)
         
+        metric_logger.update(mem_fwd_b=mem_before_fwd)
+        metric_logger.update(mem_fwd_a=mem_after_fwd)
+        metric_logger.update(mem_bwd_b=mem_before_bwd)
+        metric_logger.update(mem_bwd_a=mem_after_bwd)
+
         samples, targets = prefetcher.next()
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()

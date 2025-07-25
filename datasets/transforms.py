@@ -119,10 +119,15 @@ def resize(image, target, size, max_size=None):
     ratio_width, ratio_height = ratios
 
     target = target.copy()
+    # if "boxes" in target:
+    #     boxes = target["boxes"]
+    #     scaled_boxes = boxes * torch.as_tensor([ratio_width, ratio_height, ratio_width, ratio_height])
+    #     target["boxes"] = scaled_boxes
     if "boxes" in target:
         boxes = target["boxes"]
-        scaled_boxes = boxes * torch.as_tensor([ratio_width, ratio_height, ratio_width, ratio_height])
-        target["boxes"] = scaled_boxes
+        if boxes.shape[0] > 0:
+            scaled_boxes = boxes * torch.as_tensor([ratio_width, ratio_height, ratio_width, ratio_height])
+            target["boxes"] = scaled_boxes
 
     if "area" in target:
         area = target["area"]

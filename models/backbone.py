@@ -11,9 +11,7 @@
 Backbone modules.
 """
 from collections import OrderedDict
-from matplotlib.pylab import norm
 from torchvision.models.resnet import resnet50
-from torchvision.models import mobilenet_v3_large, mobilenet_v3_small
 
 import torch
 import torch.nn.functional as F
@@ -25,6 +23,8 @@ from typing import Dict, List
 from util.misc import NestedTensor, is_main_process
 
 from .position_encoding import build_position_encoding
+
+import pdb
 
 
 class FrozenBatchNorm2d(torch.nn.Module):
@@ -71,14 +71,43 @@ class BackboneBase(nn.Module):
 
     def __init__(self, backbone: nn.Module, train_backbone: bool, return_interm_layers: bool):
         super().__init__()
-        for name, parameter in backbone.named_parameters():
-            if not train_backbone or 'layer2' not in name and 'layer3' not in name and 'layer4' not in name:
-                parameter.requires_grad_(False)
+        # resnet50
+        if isinstance(backbone, torchvision.models.resnet.ResNet):
+            for name, parameter in backbone.named_parameters():
+                if not train_backbone or 'layer2' not in name and 'layer3' not in name and 'layer4' not in name:
+                    parameter.requires_grad_(False)
+        # mobilenet_v3
+        if isinstance(backbone, torchvision.models.mobilenet.MobileNetV3):
+            if self.name == 'mobilenet_v3_small':
+                for name, parameter in backbone.named_parameters():        
+                    if not train_backbone or 'features.3' not in name and 'features.8' not in name and 'features.12' not in name:
+                        parameter.requires_grad_(False)
+            elif self.name == 'mobilenet_v3_large':
+                for name, parameter in backbone.named_parameters():
+                    if not train_backbone or 'features.6' not in name and 'features.12' not in name and 'features.16' not in name:
+                        parameter.requires_grad_(False)
+            else:
+                raise ValueError(f"Unknown mobilenet_v3 model: {self.name}")
+
         if return_interm_layers:
-            # return_layers = {"layer1": "0", "layer2": "1", "layer3": "2", "layer4": "3"}
-            return_layers = {"layer2": "0", "layer3": "1", "layer4": "2"}
-            self.strides = [8, 16, 32]
-            self.num_channels = [512, 1024, 2048]
+            if isinstance(backbone, torchvision.models.mobilenet.MobileNetV3):
+                backbone = backbone.features
+                if self.name == 'mobilenet_v3_small':
+                    return_layers = {"3": "0", "8": "1", "12": "2"}
+                    self.num_channels = [24, 48, 576]
+                elif self.name == 'mobilenet_v3_large':
+                    return_layers = {"6": "0", "12": "1", "16": "2"}
+                    self.num_channels = [40, 112, 960]
+                else:
+                    raise ValueError(f"Unknown mobilenet_v3 model: {self.name}")
+                self.strides = [8, 16, 32]
+            elif isinstance(backbone, torchvision.models.resnet.ResNet):
+                # return_layers = {"layer1": "0", "layer2": "1", "layer3": "2", "layer4": "3"}
+                return_layers = {"layer2": "0", "layer3": "1", "layer4": "2"}
+                self.strides = [8, 16, 32]
+                self.num_channels = [512, 1024, 2048]
+            else:
+                raise ValueError(f"Unknown backbone: {backbone}")
         else:
             return_layers = {'layer4': "0"}
             self.strides = [32]
@@ -94,74 +123,44 @@ class BackboneBase(nn.Module):
             mask = F.interpolate(m[None].float(), size=x.shape[-2:]).to(torch.bool)[0]
             out[name] = NestedTensor(x, mask)
         return out
-    
-
-class MobileNetV3Backbone(nn.Module):
-    def __init__(self, model_type='large', out_channels=256):
-        super().__init__()
-        if model_type == 'large':
-            backbone = mobilenet_v3_large(pretrained=True)
-            feature_dim = 960
-        else:
-            backbone = mobilenet_v3_small(pretrained=True)
-            feature_dim = 576
-
-        self.features = backbone.features
-        self.conv = nn.Conv2d(feature_dim, out_channels, kernel_size=1)
-        self.strides = [32]
-        self.num_channels = [out_channels]
-
-    def forward(self, tensor_list: NestedTensor):
-        x = self.features(tensor_list.tensors)
-        x = self.conv(x)
-        mask = F.interpolate(tensor_list.mask[None].float(), size=x.shape[-2:]).to(torch.bool)[0]
-        return {'0': NestedTensor(x, mask)}
 
 
-class Backbone(nn.Module):
-    """Generic backbone wrapper that supports ResNet and MobileNetV3."""
+class Backbone(BackboneBase):
+    """ResNet backbone with frozen BatchNorm."""
     def __init__(self, name: str,
                  train_backbone: bool,
                  return_interm_layers: bool,
                  dilation: bool):
-        super().__init__()
+        norm_layer = FrozenBatchNorm2d
+        self.name = name
 
-        if name.startswith('mobilenet_v3'):
-            print(name)
-            model_type = 'large' if 'large' in name else 'small'
-            self.body = MobileNetV3Backbone(model_type=model_type)
-            self.strides = self.body.strides
-            self.num_channels = self.body.num_channels
-
+        if name == 'resnet50':
+            print("resnet50")
+            backbone = getattr(torchvision.models, name)(
+                replace_stride_with_dilation=[False, False, dilation],
+                pretrained=is_main_process(), norm_layer=norm_layer)
+        elif name == 'mobilenet_v3_small':
+            print("mobilenet_v3_small")
+            backbone = getattr(torchvision.models, name)(
+                pretrained=is_main_process(), norm_layer=norm_layer)
+            # mobilenet_v3 has no dilation
+            assert not dilation
+        elif name == 'mobilenet_v3_large':
+            print("mobilenet_v3_large")
+            backbone = getattr(torchvision.models, name)(
+                pretrained=is_main_process(), norm_layer=norm_layer)
+            # mobilenet_v3 has no dilation
+            assert not dilation
         else:
-            norm_layer = FrozenBatchNorm2d
-            if name == 'resnet50':
-                print("resnet50")
-                backbone = getattr(torchvision.models, name)(
-                    replace_stride_with_dilation=[False, False, dilation],
-                    pretrained=is_main_process(),
-                    norm_layer=norm_layer)
-            else:
-                print("DINO resnet50")
-                backbone = resnet50(pretrained=False,
-                                    replace_stride_with_dilation=[False, False, dilation],
-                                    norm_layer=norm_layer)
-                if is_main_process():
-                    state_dict = torch.load("models/dino_resnet50_pretrain.pth")
-                    backbone.load_state_dict(state_dict, strict=False)
-
-            assert name not in ('resnet18', 'resnet34'), "number of channels are hard coded"
-
-            self.body = BackboneBase(backbone, train_backbone, return_interm_layers)
-            self.strides = self.body.strides
-            self.num_channels = self.body.num_channels
-
-            if dilation:
-                self.strides[-1] //= 2
-
-    def forward(self, tensor_list: NestedTensor):
-        return self.body(tensor_list)
-
+            print("DINO resnet50")
+            backbone = resnet50(pretrained=False, replace_stride_with_dilation=[False, False, dilation], norm_layer=norm_layer)
+            if is_main_process():
+                state_dict = torch.load("models/dino_resnet50_pretrain.pth")
+                backbone.load_state_dict(state_dict, strict=False)
+        assert name not in ('resnet18', 'resnet34'), "number of channels are hard coded"
+        super().__init__(backbone, train_backbone, return_interm_layers)
+        if dilation:
+            self.strides[-1] = self.strides[-1] // 2
 
 
 class Joiner(nn.Sequential):
@@ -188,6 +187,10 @@ def build_backbone(args):
     position_embedding = build_position_encoding(args)
     train_backbone = args.lr_backbone > 0
     return_interm_layers = args.masks or (args.num_feature_levels > 1)
+    # pdb.set_trace()
     backbone = Backbone(args.backbone, train_backbone, return_interm_layers, args.dilation)
+    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    backbone.to(device)
+    # pdb.set_trace()
     model = Joiner(backbone, position_embedding)
     return model

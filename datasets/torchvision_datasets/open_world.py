@@ -9,6 +9,7 @@ import logging
 import copy
 from torchvision.datasets import VisionDataset
 import itertools
+from pathlib import Path
 
 import numpy as np
 import xml.etree.ElementTree as ET
@@ -96,9 +97,13 @@ T4_CLASS_NAMES = [
     "vase", "scissors", "teddy bear", "hair drier", "toothbrush",
     "wine glass", "cup", "fork", "knife", "spoon", "bowl"
 ]
+CLAD_CLASS_NAMES = [
+    'Car', 'Truck', 'Tram', 'Cyclist', 'Tricycle', 'Pedestrian'
+]
+
 VOC_COCO_CLASS_NAMES["TOWOD"] = tuple(itertools.chain(VOC_CLASS_NAMES, T2_CLASS_NAMES, T3_CLASS_NAMES, T4_CLASS_NAMES, UNK_CLASS))
 VOC_COCO_CLASS_NAMES["VOC2007"] = tuple(itertools.chain(VOC_CLASS_NAMES, T2_CLASS_NAMES, T3_CLASS_NAMES, T4_CLASS_NAMES, UNK_CLASS))
-
+VOC_COCO_CLASS_NAMES['CLAD'] = tuple(itertools.chain(CLAD_CLASS_NAMES, UNK_CLASS))
 
 print(VOC_COCO_CLASS_NAMES)
 
@@ -127,7 +132,8 @@ class OWDetection(VisionDataset):
                  image_set='train',
                  transforms=None,
                  filter_pct=-1,
-                 dataset='OWDETR'):
+                 dataset='OWDETR',
+                 output_dir=None):
         super(OWDetection, self).__init__(transforms)
         self.images = []
         self.annotations = []
@@ -139,12 +145,15 @@ class OWDetection(VisionDataset):
         self.MAX_NUM_OBJECTS = 64
         self.args = args
         self.dataset=dataset
+        self.output_dir = output_dir
 
         self.root=str(root)
-        annotation_dir = os.path.join(self.root, 'Annotations')
-        image_dir = os.path.join(self.root, 'JPEGImages')
+        # annotation_dir = os.path.join(self.root, 'Annotations')
+        annotation_dir = os.path.join(self.root, 'CLAD_PROB_FORMAT', 'data', 'OWOD', 'Annotations')
+        # image_dir = os.path.join(self.root, 'JPEGImages')
+        image_dir = os.path.join(self.root, 'CLAD_PROB_FORMAT', 'data', 'OWOD', 'JPEGImages')
 
-        file_names = self.extract_fns(image_set, self.root)
+        file_names = self.extract_fns(image_set, self.root, self.output_dir)
         if image_set == 'voc2007_trainval':
             print('PASCAL-VOC2007 dataset used; clearing images with missing object classes')
             prev_intro_cls = self.args.PREV_INTRODUCED_CLS
@@ -189,6 +198,8 @@ class OWDetection(VisionDataset):
                                                                                    self.annotations, self.imgids])
         assert (len(self.images) == len(self.annotations) == len(self.imgids))
 
+        self._remove_empty_images()
+
     @staticmethod
     def convert_image_id(img_id, to_integer=False, to_string=False, prefix='2021'):
         if to_integer:
@@ -225,13 +236,40 @@ class OWDetection(VisionDataset):
             instances.append(instance)
         return target, instances
 
-    def extract_fns(self, image_set, voc_root):
-        splits_dir = os.path.join(voc_root, 'ImageSets')
-        splits_dir = os.path.join(splits_dir, self.dataset)
+    from pathlib import Path
+
+    def extract_fns(self, image_set, voc_root, output_dir):
+        # 1. If this looks like a replay file (endswith .txt or includes a slash), treat as direct path
+        if image_set.endswith('.txt') or '/' in image_set:
+            splits_dir = 'exps/MOWODB/PROB/'
+
+            if 't1' in output_dir:
+                splits_dir += 't1/learned_owod_t1_ft.txt'
+            elif 't2' in output_dir:
+                splits_dir += 't2/learned_owod_t2_ft.txt'
+            elif 't3' in output_dir:
+                splits_dir += 't3/learned_owod_t3_ft.txt'
+            else:
+                splits_dir += 't4/learned_owod_t4_ft.txt'
+            print(splits_dir)
+            with open(os.path.join(splits_dir), "r") as f:
+                file_names = [x.strip() for x in f.readlines()]
+            return file_names
+        # 2. Regular VOC split fallback
+        # splits_dir = os.path.join(voc_root, 'ImageSets', self.dataset)
+        # split_f = os.path.join(splits_dir, image_set.rstrip('\n') + '.txt')
+        # if not os.path.exists(split_f):
+        #     raise FileNotFoundError(f"[Error] Dataset split file not found: {split_f}")
+        # with open(split_f, "r") as f:
+        #     return [x.strip() for x in f.readlines()]
+        splits_dir = os.path.join(voc_root, 'CLAD_PROB_FORMAT', 'data', 'OWOD', 'ImageSets', self.dataset)
+        print(splits_dir)
         split_f = os.path.join(splits_dir, image_set.rstrip('\n') + '.txt')
-        with open(os.path.join(split_f), "r") as f:
-            file_names = [x.strip() for x in f.readlines()]
-        return file_names
+        if not os.path.exists(split_f):
+            raise FileNotFoundError(f"[Error] Dataset split file not found: {split_f}")
+        with open(split_f, "r") as f:
+            return [x.strip() for x in f.readlines()]
+
 
     ### OWOD
     def remove_prev_class_and_unk_instances(self, target):
@@ -330,6 +368,21 @@ class OWDetection(VisionDataset):
             if not children:
                 voc_dict[node.tag] = text
         return voc_dict
+    
+    def _remove_empty_images(self):
+        non_empty_data = [
+            (img_set, img, imgid, ann)
+            for img_set, img, imgid, ann in zip(self.image_set, self.images, self.imgids, self.annotations)
+            if len(self.load_instances(imgid)[1]) > 0
+        ]
+        if non_empty_data:
+            self.image_set, self.images, self.imgids, self.annotations = zip(*non_empty_data)
+            self.image_set, self.images, self.imgids, self.annotations = (
+                list(self.image_set), list(self.images), list(self.imgids), list(self.annotations)
+            )
+            assert len(self.images) == len(self.imgids) == len(self.annotations)
+        else:
+            self.image_set, self.images, self.imgids, self.annotations = [], [], [], []
 
 
 def download_extract(url, root, filename, md5):

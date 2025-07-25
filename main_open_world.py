@@ -29,6 +29,10 @@ from datasets.torchvision_datasets.open_world import OWDetection
 from engine import evaluate, train_one_epoch, get_exemplar_replay
 from models import build_model
 import wandb
+import sys
+import pdb
+
+# from datasets.open_world_clad import OWCladDetection
 
 
 
@@ -108,6 +112,7 @@ def get_args_parser():
     parser.add_argument('--device', default='cuda',
                         help='device to use for training / testing')
     parser.add_argument('--seed', default=42, type=int)
+    # parser.add_argument('--resume', default='./exps/MOWODB/PROB/t1/checkpoint0040.pth', help='resume from checkpoint')
     parser.add_argument('--resume', default='', help='resume from checkpoint')
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
                         help='start epoch')
@@ -119,7 +124,8 @@ def get_args_parser():
     
     ################ OW-DETR ################
     parser.add_argument('--PREV_INTRODUCED_CLS', default=0, type=int)
-    parser.add_argument('--CUR_INTRODUCED_CLS', default=20, type=int)
+    # parser.add_argument('--CUR_INTRODUCED_CLS', default=20, type=int)
+    parser.add_argument('--CUR_INTRODUCED_CLS', default=3, type=int)
     parser.add_argument('--unmatched_boxes', default=False, action='store_true')
     parser.add_argument('--top_unk', default=5, type=int)
     parser.add_argument('--featdim', default=1024, type=int)
@@ -130,19 +136,22 @@ def get_args_parser():
     parser.add_argument('--nc_loss_coef', default=2, type=float)
     parser.add_argument('--train_set', default='', help='training txt files')
     parser.add_argument('--test_set', default='', help='testing txt files')
-    parser.add_argument('--num_classes', default=81, type=int)
+    # parser.add_argument('--num_classes', default=81, type=int)
+    parser.add_argument('--num_classes', default=7, type=int)
     parser.add_argument('--nc_epoch', default=0, type=int)
     parser.add_argument('--dataset', default='OWDETR', help='defines which dataset is used. Built for: {TOWOD, OWDETR, VOC2007}')
-    parser.add_argument('--data_root', default='./data/OWOD', type=str)
+    # parser.add_argument('--data_root', default='./data/OWOD', type=str)
+    parser.add_argument('--data_root', default='../../data', type=str)
     parser.add_argument('--unk_conf_w', default=1.0, type=float)
 
     ################ PROB OWOD ################
     # model config
     parser.add_argument('--model_type', default='prob', type=str)
+    parser.add_argument('--lite_model', default=None, type=str)
     
     # logging
     parser.add_argument('--wandb_name', default='', type=str)
-    parser.add_argument('--wandb_project', default='', type=str)
+    parser.add_argument('--wandb_project', default='CLAD', type=str)
     
     # model hyperparameters
     parser.add_argument('--obj_loss_coef', default=1, type=float)
@@ -163,12 +172,12 @@ def get_args_parser():
 def main(args):
     if len(args.wandb_project)>0:
         if len(args.wandb_name)>0:
-            wandb.init(project=args.wandb_project, entity="marvl", group=args.wandb_name)
+            wandb.init(project=args.wandb_project, group=args.wandb_name)
         else:
-            wandb.init(project=args.wandb_project, entity="marvl")
+            wandb.init(project=args.wandb_project)
         wandb.config = args
-    else:
-        wandb=None
+    # else:
+    #     wandb=None
 
     utils.init_distributed_mode(args)
     print("git:\n  {}\n".format(utils.get_sha()))
@@ -186,7 +195,13 @@ def main(args):
     random.seed(seed)
 
     model, criterion, postprocessors, exemplar_selection = build_model(args, mode = args.model_type)
+    # pdb.set_trace()
+    print(f"[Before model load] Allocated: {torch.cuda.memory_allocated() / 1024**2:.2f} MB")
+    print(f"[Before model load] Max Allocated: {torch.cuda.max_memory_allocated() / 1024**2:.2f} MB")
     model.to(device)
+    # pdb.set_trace()
+    print(f"[After model load] Allocated: {torch.cuda.memory_allocated() / 1024**2:.2f} MB")
+    print(f"[After model load] Max Allocated: {torch.cuda.max_memory_allocated() / 1024**2:.2f} MB")
 
     model_without_ddp = model
     print(model_without_ddp)
@@ -248,7 +263,8 @@ def main(args):
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args.lr_drop)
 
     if args.distributed:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
+        # model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[0])
         model_without_ddp = model.module
 
     if args.dataset == "coco_panoptic":
@@ -334,6 +350,9 @@ def main(args):
             sampler_train.set_epoch(epoch)
         train_stats = train_one_epoch(
             model, criterion, data_loader_train, optimizer, device, epoch, args.nc_epoch, args.clip_max_norm, wandb)
+        print('========================================================')
+        print(train_stats)
+        sys.stdout.flush()
             
         lr_scheduler.step()
         if args.output_dir:
@@ -361,10 +380,16 @@ def main(args):
                     'args': args,
                 }, checkpoint_path)
             
-        log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
-                     **{f'test_{k}': v for k, v in test_stats.items()},
-                     'epoch': epoch,
-                     'n_parameters': n_parameters}
+        # log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
+        #              **{f'test_{k}': v for k, v in test_stats.items()},
+        #              'epoch': epoch,
+        #              'n_parameters': n_parameters}
+        log_stats = {
+            **{f'train_{k}': v for k, v in train_stats.items()},
+            **{f'test_{k}': v for k, v in (test_stats.items() if test_stats else [])},
+            'epoch': epoch,
+            'n_parameters': n_parameters
+        }
         
         if args.output_dir and utils.is_main_process():
             with (output_dir / "log.txt").open("a") as f:
@@ -396,8 +421,8 @@ def get_datasets(args):
 
     train_set = args.train_set
     test_set = args.test_set
-    dataset_train = OWDetection(args, args.data_root, image_set=args.train_set, transforms=make_coco_transforms(args.train_set), dataset = args.dataset)
-    dataset_val = OWDetection(args, args.data_root, image_set=args.test_set, dataset = args.dataset, transforms=make_coco_transforms(args.test_set))
+    dataset_train = OWDetection(args, args.data_root, image_set=args.train_set, transforms=make_coco_transforms(args.train_set), dataset = args.dataset, output_dir=args.output_dir)
+    dataset_val = OWDetection(args, args.data_root, image_set=args.test_set, dataset = args.dataset, transforms=make_coco_transforms(args.test_set), output_dir=args.output_dir)
 
     print(args.train_set)
     print(args.test_set)
@@ -409,28 +434,38 @@ def get_datasets(args):
 
 def create_ft_dataset(args, image_sorted_scores):
     print(f'found a total of {len(image_sorted_scores.keys())} images')
-    tmp_dir=args.data_root +'/ImageSets/'+args.dataset+"/"+args.exemplar_replay_dir+"/"
-    #tmp_dir=args.data_root +'/ImageSets/'+args.exemplar_replay_dir+"/"
 
-    class_sorted_scores={}
-    imgs_per_class={}
-    for i in range(args.PREV_INTRODUCED_CLS, args.CUR_INTRODUCED_CLS+args.PREV_INTRODUCED_CLS):
-        class_sorted_scores[str(i)]=[]
-        imgs_per_class[str(i)]=[]
+    # 저장 디렉토리는 현재 task의 output_dir로 고정
+    save_dir = args.output_dir
+    os.makedirs(save_dir, exist_ok=True)
 
-    for k,v in image_sorted_scores.items():
+    # 이전 learned 파일 경로는 output_dir의 부모 디렉토리 하위의 이전 task로 추정
+    previous_ft_path = ""
+    if len(args.exemplar_replay_prev_file) > 0:
+        parent_dir = Path(args.output_dir).parent  # exps/MOWODB/PROB
+        current_task = Path(args.output_dir).name  # t2
+        if current_task.startswith('t'):
+            prev_task_num = int(current_task[1:]) - 1
+            prev_task_dir = parent_dir / f"t{prev_task_num}"
+            previous_ft_path = prev_task_dir / args.exemplar_replay_prev_file
+        else:
+            print(f"[Warning] Unrecognized task format in output_dir: {current_task}")
+
+    # 클래스별 점수 수집
+    class_sorted_scores = {str(i): [] for i in range(args.PREV_INTRODUCED_CLS, args.CUR_INTRODUCED_CLS + args.PREV_INTRODUCED_CLS)}
+    imgs_per_class = {str(i): [] for i in range(args.PREV_INTRODUCED_CLS, args.CUR_INTRODUCED_CLS + args.PREV_INTRODUCED_CLS)}
+
+    for k, v in image_sorted_scores.items():
         for j in range(len(v['labels'])):
             class_sorted_scores[str(v['labels'][j])].append(v['scores'][j])
 
-
-    class_threshold={}
-    for i in range(args.PREV_INTRODUCED_CLS, args.CUR_INTRODUCED_CLS+args.PREV_INTRODUCED_CLS):
-        tmp=np.array(class_sorted_scores[str(i)])
-        tmp.sort()
-        tmp = torch.Tensor(tmp)
-        if len(tmp)>args.num_inst_per_class and not args.exemplar_replay_random:
-            max_val = tmp[-args.num_inst_per_class//2]
-            min_val = tmp[args.num_inst_per_class//2]
+    # 클래스별 threshold 계산
+    class_threshold = {}
+    for i in range(args.PREV_INTRODUCED_CLS, args.CUR_INTRODUCED_CLS + args.PREV_INTRODUCED_CLS):
+        tmp = torch.tensor(sorted(class_sorted_scores[str(i)]))
+        if len(tmp) > args.num_inst_per_class and not args.exemplar_replay_random:
+            max_val = tmp[-args.num_inst_per_class // 2]
+            min_val = tmp[args.num_inst_per_class // 2]
         else:
             if args.exemplar_replay_random:
                 print('using random exemplar selection')
@@ -438,33 +473,41 @@ def create_ft_dataset(args, image_sorted_scores):
                 print(f'only found {len(tmp)} imgs in class {i}')
             max_val = tmp.min()
             min_val = tmp.max()
-            
-        class_threshold[str(i)]=(min_val, max_val)
+        class_threshold[str(i)] = (min_val, max_val)
 
-    save_imgs = []    
-    for k,v in image_sorted_scores.items():
+    # threshold 기준으로 이미지 선택
+    save_imgs = []
+    for k, v in image_sorted_scores.items():
         for j in range(len(v['labels'])):
             label = str(v['labels'][j])
-            if (v['scores'][j] <= class_threshold[label][0].numpy() or v['scores'][j] >= class_threshold[label][1].numpy()) and (len(imgs_per_class[label])<=args.num_inst_per_class+2):
+            if (v['scores'][j] <= class_threshold[label][0].item() or v['scores'][j] >= class_threshold[label][1].item()) and (len(imgs_per_class[label]) <= args.num_inst_per_class + 2):
                 save_imgs.append(k)
                 imgs_per_class[label].append(k)
-                        
+
     print(f'found {len(np.unique(save_imgs))} images in run')
-    if len(args.exemplar_replay_prev_file)>0:
-        previous_ft = open(tmp_dir+args.exemplar_replay_prev_file,'r').read().splitlines()
-        save_imgs+=previous_ft
-        
-    save_imgs=np.unique(save_imgs)
+
+    # 이전 학습에서 선택된 이미지 추가
+    if previous_ft_path and os.path.exists(previous_ft_path):
+        print(f"[Info] Loading previous replay file from: {previous_ft_path}")
+        with open(previous_ft_path, 'r') as f:
+            previous_ft = f.read().splitlines()
+        save_imgs += previous_ft
+    elif previous_ft_path:
+        print(f"[Warning] Previous exemplar replay file not found: {previous_ft_path}")
+
+    # 저장
+    save_imgs = np.unique(save_imgs)
     np.random.shuffle(save_imgs)
-    if len(save_imgs)> args.exemplar_replay_max_length:
-        save_imgs=save_imgs[:args.exemplar_replay_max_length]
-    
-    os.makedirs(tmp_dir, exist_ok=True)
-    with open(tmp_dir+args.exemplar_replay_cur_file, 'w') as f:
+    if len(save_imgs) > args.exemplar_replay_max_length:
+        save_imgs = save_imgs[:args.exemplar_replay_max_length]
+
+    save_path = os.path.join(save_dir, args.exemplar_replay_cur_file)
+    with open(save_path, 'w') as f:
         for line in save_imgs:
-            f.write(line)
-            f.write('\n')
-    return
+            f.write(line + '\n')
+
+    print(f"[Saved] {len(save_imgs)} images written to {save_path}")
+
     
 
 if __name__ == '__main__':
