@@ -7,4 +7,6 @@
 # ------------------------------------------------------------------------------------------------
 
 from .ms_deform_attn_func import MSDeformAttnFunction
-
+from .ms_deform_attn_func_lite import MSDeformAttnFunction as MSDeformAttnFunctionLite
+from .ms_deform_attn_func_lite import ms_deform_attn_core_pytorch
+from .ms_deform_attn_func_lite import ms_deform_attn_core_pytorch_key_aware
