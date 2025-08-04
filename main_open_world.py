@@ -30,7 +30,6 @@ from engine import evaluate, get_exemplar_replay # train_one_epoch
 # from logging_test import train_one_epoch
 from models import build_model
 
-import wandb
 from memory_profiler import profile
 
 ########################
@@ -521,6 +520,7 @@ def main(args):
     ###
     args.distributed = False
     ###
+    import wandb
     if len(args.wandb_project)>0:
         if len(args.wandb_name)>0:
             wandb.init(project=args.wandb_project, group=args.wandb_name, config = vars(args))
