@@ -713,7 +713,8 @@ class TransformerDecoder(nn.Module):
         self.use_detached_boxes_dec_out = use_detached_boxes_dec_out
 
         
-        self.ref_point_head = MLP(query_dim // 2 * d_model, d_model, d_model, 2)
+        # self.ref_point_head = MLP(query_dim // 2 * d_model, d_model, d_model, 2)
+        self.ref_point_head = MLP(512, d_model, d_model, 2)
         if not deformable_decoder:
             self.query_pos_sine_scale = MLP(d_model, d_model, d_model, 2)
         else:

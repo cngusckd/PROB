@@ -24,7 +24,6 @@ from .matcher import build_matcher
 from .segmentation import (DETRsegm, PostProcessPanoptic, PostProcessSegm,
                            dice_loss)
 from .segmentation import sigmoid_focal_loss as seg_sigmoid_focal_loss
-from .deformable_transformer import build_deforamble_transformer
 import copy
 
 
@@ -599,7 +598,13 @@ def build(args):
     device = torch.device(args.device)
     
     backbone = build_backbone(args)
-    transformer = build_deforamble_transformer(args)
+
+    # if args.lite_model == "lite":
+    #     from .deformable_transformer_lite import build_deformable_transformer
+    # else:
+    from .deformable_transformer import build_deformable_transformer
+    
+    transformer = build_deformable_transformer(args)
     
     model = DeformableDETR(
         backbone,

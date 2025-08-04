@@ -31,6 +31,7 @@ from engine import evaluate, get_exemplar_replay # train_one_epoch
 from models import build_model
 
 import wandb
+from memory_profiler import profile
 
 ########################
 ########################
@@ -153,6 +154,7 @@ def get_my_gpu_memory_usage():
 import math
 import sys
 from copy import deepcopy
+@profile
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, nc_epoch: int, max_norm: float = 0, wandb: object = None):
@@ -169,7 +171,11 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     samples, targets = prefetcher.next()
 
     for _idx, _ in enumerate(metric_logger.log_every(range(len(data_loader)), print_freq, header)):
-        outputs = model(samples)
+
+        if args.model_type == 'prob':
+            outputs = model(samples)
+        elif args.model_type == 'lite':
+            outputs = model(samples, targets)
         after_forward_cpu_usage = get_memory_mb()['total']
         after_forward_gpu_usage = get_my_gpu_memory_usage()[0][1]
         after_forward_gpu_allocated = torch.cuda.memory_allocated(device)
@@ -404,6 +410,7 @@ def get_args_parser():
     ################ PROB OWOD ################
     # model config
     parser.add_argument('--model_type', default='prob', type=str)
+    parser.add_argument('--lite_model', default='', type=str)
     
     # logging
     parser.add_argument('--wandb_name', default='', type=str)
@@ -431,13 +438,89 @@ def get_args_parser():
     # parser.add_argument('--custom_scales', default=[480, 512, 544, 576, 608, 640], type=list, help="path to current ft file")
     # parser.add_argument('--custom_max_size', default=1080, type=int, help="path to current ft file")
 
+    ################ Lite-DETR ################
+    parser.add_argument('--decoder_layer_noise', default=False, type=bool, help='add perturbation to decoder query')
+    parser.add_argument('--dln_xy_noise', default=0.2, type=float, help='decoder layer noise for xy')
+    parser.add_argument('--dln_hw_noise', default=0.2, type=float, help='decoder layer noise for hw')
+    parser.add_argument("--use_detached_boxes_dec_out", action="store_true")
+
+    parser.add_argument("--dim_feedforward_enc", default=2048, type=int)
+    parser.add_argument("--unic_layers", default=0, type=int)
+    parser.add_argument("--pre_norm", action="store_true")
+    parser.add_argument("--query_dim", default=4, type=int)
+    parser.add_argument("--transformer_activation", default="relu", type=str)
+    parser.add_argument("--num_patterns", default=0, type=int)
+
+    parser.add_argument("--use_deformable_box_attn", action="store_true")
+    parser.add_argument("--box_attn_type", default="roi_align", type=str)
+
+    parser.add_argument("--add_channel_attention", action="store_true")
+    parser.add_argument("--add_pos_value", action="store_true")
+    parser.add_argument("--random_refpoints_xy", action="store_true")
+
+    parser.add_argument("--two_stage_type", default="standard", type=str)  # ['no', 'standard', 'early']
+    parser.add_argument("--two_stage_pat_embed", default=0, type=int)
+    parser.add_argument("--two_stage_add_query_num", default=0, type=int)
+    parser.add_argument("--two_stage_learn_wh", action="store_true")
+    parser.add_argument("--two_stage_keep_all_tokens", action="store_true")
+    parser.add_argument("--dec_layer_number", default=None, type=str)  # stringified list
+
+    parser.add_argument("--decoder_sa_type", default="sa", type=str)
+    parser.add_argument("--decoder_module_seq", default=['sa', 'ca', 'ffn'], type=str)
+    parser.add_argument("--embed_init_tgt", default=True, type=bool)
+    parser.add_argument("--enc_scale", default=3, type=int)
+    parser.add_argument("--dim_feedforward_dec", default=2048, type=int)
+    parser.add_argument("--use_pytorch_version", action="store_true")
+    parser.add_argument("--value_proj_after", action="store_true")
+    parser.add_argument("--small_expand", action="store_true")
+    parser.add_argument("--num_expansion", default=3, type=int)
+    parser.add_argument("--deformable_use_checkpoint", action="store_true")
+    parser.add_argument("--same_loc", default=True, type=bool)
+    parser.add_argument("--proj_key", action="store_true")
+    parser.add_argument("--key_aware", default=True, type=bool)
+    # for dn
+    parser.add_argument("--use_dn", default=True, type=bool) # action="store_true") # True
+    parser.add_argument("--dn_number", default=100, type=int)
+    parser.add_argument("--dn_box_noise_scale", default=1.0, type=float)
+    parser.add_argument("--dn_label_noise_ratio", default=0.5, type=float)
+    parser.add_argument("--dn_labelbook_size", default=91, type=int)
+    parser.add_argument("--match_unstable_error", default=None, type=str)
+
+    parser.add_argument('--fix_refpoints_hw', default=-1, type=float, help='-1 for learnable refpoint w/h, -2 for shared w/h, >0 for fixed w/h')
+    parser.add_argument('--two_stage_bbox_embed_share', action='store_true', help='Whether to share bbox embed layer between encoder and decoder in two-stage mode')
+    parser.add_argument('--two_stage_class_embed_share', action='store_true', help='Share class embed between encoder and decoder')
+    parser.add_argument('--two_stage_prob_obj_head_share', action='store_true', help='Share objectness head between encoder and decoder')
+    
+    parser.add_argument('--num_select', default=20, type=int,
+                        help='Top-K predictions to keep per image for evaluation (작은 데이터셋이면 20~50 추천)')
+    parser.add_argument('--nms_iou_threshold', default=0.5, type=float,
+                        help='IoU threshold for NMS. -1 means no NMS. 작은 데이터셋에서는 0.3~0.5 추천')
+
+    parser.add_argument('--dec_pred_prob_obj_head_share', default=True, type=bool)
+    # === build() 내부에서 args.interm_loss_coef 참조하는 코드가 있어 필요한 옵션 ===
+    parser.add_argument('--interm_loss_coef', default=1.0, type=float)
+    parser.add_argument('--no_interm_box_loss', action='store_true')
+
+    # === 추가적으로 작은 데이터셋에 적합한 설정 추천 ===
+    parser.add_argument('--overfit_single_batch', action='store_true', help='Debug mode: train on a single batch repeatedly')
+    parser.add_argument('--max_train_images', default=None, type=int, help='Limit number of training images (for small datasets)')
+    parser.add_argument('--debug_eval_images', default=100, type=int, help='Limit number of images for eval (for small datasets)')
+    parser.add_argument('--log_interval', default=10, type=int, help='Logging interval for training batches')
+    parser.add_argument('--small_dataset', action='store_true', help='Apply small dataset strategy like no-lr-warmup or short epochs')
+
+    # === Lite-DETR build()에서 예외 처리 없이 쓰는 항목 ===
+    parser.add_argument('--enc_class_embed_share', default=True, type=bool)
+    parser.add_argument('--enc_bbox_embed_share', default=True, type=bool)
+    parser.add_argument('--enc_prob_obj_head_share', default=True, type=bool)
+
+
+
     return parser
 
 def main(args):
     ###
     args.distributed = False
     ###
-    import wandb
     if len(args.wandb_project)>0:
         if len(args.wandb_name)>0:
             wandb.init(project=args.wandb_project, group=args.wandb_name, config = vars(args))
