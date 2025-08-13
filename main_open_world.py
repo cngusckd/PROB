@@ -104,30 +104,58 @@ def custom_coco_transform(image_set, custom_scales, custom_max_size):
     raise ValueError(f'unknown {image_set}')
     
 from resource import getrusage, RUSAGE_CHILDREN, RUSAGE_SELF
+import psutil
 
 # CPU 메모리 측정
 def get_memory_mb():
     """
-    Get the memory usage of the current process and its children.
+    Get both current (real-time) and peak memory usage of the current process and its children.
 
     Returns:
         dict: A dictionary containing the memory usage of the current process and its children.
 
         The dictionary has the following keys:
-            - self: The memory usage of the current process.
-            - children: The memory usage of the children of the current process.
-            - total: The total memory usage of the current process and its children.
+            - self: The peak memory usage of the current process (기존).
+            - children: The peak memory usage of the children of the current process (기존).
+            - total: The total peak memory usage of the current process and its children (기존).
+            - current_self: The current real-time memory usage of the current process (새로 추가).
+            - current_children: The current real-time memory usage of the children (새로 추가).
+            - current_total: The current real-time total memory usage (새로 추가).
     """
+    # 기존 peak 메모리 (누적 최대값)
+    peak_self = getrusage(RUSAGE_SELF).ru_maxrss / 1024
+    peak_children = getrusage(RUSAGE_CHILDREN).ru_maxrss / 1024
+    
+    # 실시간 현재 메모리 사용량
+    process = psutil.Process(os.getpid())
+    current_self = process.memory_info().rss / (1024 * 1024)  # MB
+    
+    # 자식 프로세스들의 현재 메모리
+    current_children = 0
+    try:
+        for child in process.children(recursive=True):
+            try:
+                current_children += child.memory_info().rss / (1024 * 1024)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+    except:
+        current_children = 0
+    
     res = {
-        "self": getrusage(RUSAGE_SELF).ru_maxrss / 1024,
-        "children": getrusage(RUSAGE_CHILDREN).ru_maxrss / 1024,
-        "total": getrusage(RUSAGE_SELF).ru_maxrss / 1024 + getrusage(RUSAGE_CHILDREN).ru_maxrss / 1024
+        # 기존 peak 메모리 (호환성 유지)
+        "self": peak_self,
+        "children": peak_children,
+        "total": peak_self + peak_children,
+        
+        # 새로 추가된 실시간 메모리
+        "current_self": current_self,
+        "current_children": current_children,
+        "current_total": current_self + current_children
     }
     return res
 
 from typing import Iterable
 from datasets.data_prefetcher import data_prefetcher
-
 
 import pynvml
 def get_my_gpu_memory_usage():
@@ -150,9 +178,11 @@ def get_my_gpu_memory_usage():
     pynvml.nvmlShutdown()
 
     return usage_entries
+
 import math
 import sys
 from copy import deepcopy
+
 @profile
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
@@ -175,7 +205,9 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             outputs = model(samples)
         elif args.model_type == 'lite':
             outputs = model(samples, targets)
-        after_forward_cpu_usage = get_memory_mb()['total']
+            
+        # Forward 후 메모리 측정
+        after_forward_memory = get_memory_mb()
         after_forward_gpu_usage = get_my_gpu_memory_usage()[0][1]
         after_forward_gpu_allocated = torch.cuda.memory_allocated(device)
         after_forward_gpu_reserved = torch.cuda.memory_reserved(device)
@@ -211,7 +243,9 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
  
         optimizer.zero_grad()
         losses.backward()
-        after_backward_cpu_usage = get_memory_mb()
+        
+        # Backward 후 메모리 측정
+        after_backward_memory = get_memory_mb()
         after_backward_gpu_usage = get_my_gpu_memory_usage()[0][1]
         after_backward_gpu_allocated = torch.cuda.memory_allocated(device)
         after_backward_gpu_reserved = torch.cuda.memory_reserved(device)
@@ -224,16 +258,27 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         optimizer.step()
 
         wandb.log({
-            "After Forward CPU Usage" : after_forward_cpu_usage,
+            # 기존 CPU 메모리 (peak 값들)
+            "After Forward CPU Usage (Peak)" : after_forward_memory['total'],
+            "After Backward CPU Usage (Peak)" : after_backward_memory['total'],
+            
+            # 새로 추가된 실시간 CPU 메모리 
+            "After Forward CPU Usage (Current)" : after_forward_memory['current_total'],
+            "After Backward CPU Usage (Current)" : after_backward_memory['current_total'],
+            "After Forward CPU Self (Current)" : after_forward_memory['current_self'],
+            "After Forward CPU Children (Current)" : after_forward_memory['current_children'],
+            "After Backward CPU Self (Current)" : after_backward_memory['current_self'],
+            "After Backward CPU Children (Current)" : after_backward_memory['current_children'],
+            
+            # 기존 GPU 메모리들
             'After Forward GPU(with pynvml) Usage' : float(f"{after_forward_gpu_usage}"),
             "After Forward GPU(with torch.cuda.memory_allocated()) Usage" : float(f"{after_forward_gpu_allocated / 1024 ** 2:.2f}"),
             "After Forward GPU(with torch.cuda.memory_reserved()) Usage" : float(f"{after_forward_gpu_reserved / 1024 ** 2:.2f}"),
             "After Forward GPU(with torch.cuda.max_memory_allocated()) Usage" : float(f"{after_forward_gpu_max_allocated / 1024 ** 2:.2f}"),
-            "After Backward CPU Usage" : after_backward_cpu_usage,
             "After Backward GPU(with pynvml) Usage" : float(f"{after_backward_gpu_usage}"),
             "After Backward GPU(with torch.cuda.memory_allocated()) Usage" : float(f"{after_backward_gpu_allocated / 1024 ** 2:.2f}"),
-            "After Forward GPU(with torch.cuda.memory_reserved()) Usage" : float(f"{after_backward_gpu_reserved / 1024 ** 2:.2f}"),
-            "After Forward GPU(with torch.cuda.max_memory_allocated()) Usage" : float(f"{after_backward_gpu_max_allocated / 1024 ** 2:.2f}"),
+            "After Backward GPU(with torch.cuda.memory_reserved()) Usage" : float(f"{after_backward_gpu_reserved / 1024 ** 2:.2f}"),
+            "After Backward GPU(with torch.cuda.max_memory_allocated()) Usage" : float(f"{after_backward_gpu_max_allocated / 1024 ** 2:.2f}"),
         })
 
         '''
