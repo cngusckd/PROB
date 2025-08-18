@@ -557,6 +557,45 @@ def main(args):
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print('number of params:', n_parameters)
 
+    print("\n" + "="*60)
+    print("DEBUG: 모든 파라미터 이름을 확인하여 동결 대상을 찾습니다...")
+    print("="*60)
+
+    unfrozen_param_count = 0
+    frozen_param_count = 0
+
+    # 모델의 모든 파라미터 이름을 출력합니다.
+    for name, param in model_without_ddp.named_parameters():
+        # 'backbone'으로 시작하는지 확인합니다.
+        if name.startswith("backbone"):
+            print(f"  -> ✅ MATCH! 동결 대상: {name}")
+            param.requires_grad = False
+            # 동결을 하지 않는 것
+            # param.requires_grad = True
+            frozen_param_count += 1
+        else:
+            # 동결되지 않는 파라미터들
+            unfrozen_param_count += 1
+            # 너무 많이 출력되는 것을 막기 위해 일부만 출력
+            if unfrozen_param_count < 10:
+                print(f"  -> ❌ SKIP! 학습 대상: {name}")
+            elif unfrozen_param_count == 10:
+                print("  -> (이하 학습 대상 파라미터는 생략)...")
+
+    print("="*60)
+    if frozen_param_count == 0:
+        print("‼️ 경고: 'backbone'으로 시작하는 파라미터를 찾지 못했습니다!")
+        print("   모델의 feature extractor 이름이 다를 수 있습니다.")
+    else:
+        print(f"성공: {frozen_param_count}개의 파라미터 그룹을 동결했습니다.")
+    print("="*60 + "\n")
+
+
+    # [확인용] 동결 후 학습 가능한 파라미터 수를 다시 출력합니다.
+    n_parameters_after_freezing = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f'Original params: {n_parameters}')
+    print(f'Trainable params after freezing: {n_parameters_after_freezing}')
+
     dataset_train, dataset_val = get_datasets(args)
     
     if args.distributed:
@@ -589,22 +628,29 @@ def main(args):
                 break
         return out
 
+    # param_dicts = [
+    #     {
+    #         "params":
+    #             [p for n, p in model_without_ddp.named_parameters()
+    #              if not match_name_keywords(n, args.lr_backbone_names) and not match_name_keywords(n, args.lr_linear_proj_names) and p.requires_grad],
+    #         "lr": args.lr,
+    #     },
+    #     {
+    #         "params": [p for n, p in model_without_ddp.named_parameters() if match_name_keywords(n, args.lr_backbone_names) and p.requires_grad],
+    #         "lr": args.lr_backbone,
+    #     },
+    #     {
+    #         "params": [p for n, p in model_without_ddp.named_parameters() if match_name_keywords(n, args.lr_linear_proj_names) and p.requires_grad],
+    #         "lr": args.lr * args.lr_linear_proj_mult,
+    #     }
+    # ]
+
+    # 2. 학습할 파라미터만 필터링하여 optimizer에 전달합니다.
+    #    (requires_grad가 True인 파라미터만 학습 대상이 됩니다)
     param_dicts = [
-        {
-            "params":
-                [p for n, p in model_without_ddp.named_parameters()
-                 if not match_name_keywords(n, args.lr_backbone_names) and not match_name_keywords(n, args.lr_linear_proj_names) and p.requires_grad],
-            "lr": args.lr,
-        },
-        {
-            "params": [p for n, p in model_without_ddp.named_parameters() if match_name_keywords(n, args.lr_backbone_names) and p.requires_grad],
-            "lr": args.lr_backbone,
-        },
-        {
-            "params": [p for n, p in model_without_ddp.named_parameters() if match_name_keywords(n, args.lr_linear_proj_names) and p.requires_grad],
-            "lr": args.lr * args.lr_linear_proj_mult,
-        }
+        {"params": [p for n, p in model_without_ddp.named_parameters() if p.requires_grad]}
     ]
+
     if args.sgd:
         optimizer = torch.optim.SGD(param_dicts, lr=args.lr, momentum=0.9,
                                     weight_decay=args.weight_decay)
