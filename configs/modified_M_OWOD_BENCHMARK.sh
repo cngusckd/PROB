@@ -11,14 +11,15 @@ WANDB_NAME=CLAD_SW
 REPLAY_NAME=learned_clad
 MODEL_TYPE=prob
 BATCH_SIZE=2
+FREEZE_MODEL=none
 
 EPOCHS=21
 
 # train task 1
 python -m memory_profiler main_open_world.py \
     --output_dir "${EXP_DIR}/t1" --dataset CLAD --PREV_INTRODUCED_CLS 0 --CUR_INTRODUCED_CLS 3\
-    --train_set 'clad_t1_train_2025ver' --test_set 'clad_test' --epochs ${EPOCHS}\
-    --model_type "${MODEL_TYPE}" --obj_loss_coef 8e-4 --obj_temp 1.3 --batch_size ${BATCH_SIZE}\
+    --train_set 'clad_t1_train_2025ver' --test_set 'clad_test' --epochs ${EPOCHS} --transformer_weights 'none'\
+    --model_type "${MODEL_TYPE}" --obj_loss_coef 8e-4 --obj_temp 1.3 --batch_size ${BATCH_SIZE} --freeze_mode ${FREEZE_MODEL}\
     --wandb_project ${PROJECT_NAME} --wandb_name "${WANDB_NAME}_t1" --exemplar_replay_selection --exemplar_replay_max_length 1000\
     --exemplar_replay_dir ${WANDB_NAME} --exemplar_replay_cur_file "${REPLAY_NAME}_t1_ft.txt" \
     ${PY_ARGS}
@@ -29,7 +30,7 @@ python -m memory_profiler main_open_world.py \
 # python -u main_open_world.py \
 #     --output_dir "${EXP_DIR}/t2" --dataset CLAD --PREV_INTRODUCED_CLS 3 --CUR_INTRODUCED_CLS 2\
 #     --train_set 'clad_t2_train_2025ver' --test_set 'clad_test' --epochs $(( EPOCHS + 20 ))\
-#     --model_type 'prob' --obj_loss_coef 8e-4 --obj_temp 1.3 --freeze_prob_model \
+#     --model_type 'prob' --obj_loss_coef 8e-4 --obj_temp 1.3 --freeze_prob_model\
 #     --wandb_project ${PROJECT_NAME} --wandb_name "${WANDB_NAME}_t2" --batch_size ${BATCH_SIZE}\
 #     --exemplar_replay_selection --exemplar_replay_max_length 1000 --exemplar_replay_dir ${WANDB_NAME}\
 #     --exemplar_replay_prev_file "${REPLAY_NAME}_t1_ft.txt" --exemplar_replay_cur_file "${REPLAY_NAME}_t2_ft.txt"\

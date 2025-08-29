@@ -402,8 +402,8 @@ def get_args_parser():
     parser.add_argument('--num_classes', default=81, type=int)
     parser.add_argument('--nc_epoch', default=0, type=int)
     parser.add_argument('--dataset', default='OWDETR', help='defines which dataset is used. Built for: {TOWOD, OWDETR, VOC2007}')
-    parser.add_argument('--data_root', default='../data/CLAD_PROB_FORMAT/data/OWOD', type=str)
-    # parser.add_argument('--data_root', default='./data/OWOD', type=str)
+    # parser.add_argument('--data_root', default='../data/CLAD_PROB_FORMAT/data/OWOD', type=str)
+    parser.add_argument('--data_root', default='../data/PROB', type=str)
     parser.add_argument('--unk_conf_w', default=1.0, type=float)
 
     ################ PROB OWOD ################
@@ -436,6 +436,14 @@ def get_args_parser():
     
     # parser.add_argument('--custom_scales', default=[480, 512, 544, 576, 608, 640], type=list, help="path to current ft file")
     # parser.add_argument('--custom_max_size', default=1080, type=int, help="path to current ft file")
+    parser.add_argument('--freeze_mode', type=str, default='none',
+                        choices=['none', 'backbone', 'backbone_transformer'],
+                        help='Specify parts of the model to freeze during training. '
+                             '"none": train all parameters. '
+                             '"backbone": freeze only the backbone. '
+                             '"backbone_transformer": freeze both backbone and transformer.')
+    parser.add_argument('--transformer_weights', type=str, default=None,
+                            help='Path to the pretrained transformer weights, used when freeze_mode is backbone_transformer.')
 
     ################ Lite-DETR ################
     parser.add_argument('--decoder_layer_noise', default=False, type=bool, help='add perturbation to decoder query')
@@ -532,7 +540,7 @@ def main(args):
     else:
         wandb=None
     wandb.run.name = args.wandb_name
-    wandb.run.save()
+    # wandb.run.save()
 
     utils.init_distributed_mode(args)
     print("git:\n  {}\n".format(utils.get_sha()))
@@ -557,44 +565,52 @@ def main(args):
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print('number of params:', n_parameters)
 
-    print("\n" + "="*60)
-    print("DEBUG: 모든 파라미터 이름을 확인하여 동결 대상을 찾습니다...")
-    print("="*60)
+   # 1. --freeze_mode 인자에 따라 파라미터를 조건부로 동결합니다.
+    print(f"Applying freeze mode: {args.freeze_mode}")
+    if args.freeze_mode == 'backbone':
+        for name, param in model_without_ddp.named_parameters():
+            if name.startswith("backbone"):
+                param.requires_grad = False
+    
+    elif args.freeze_mode == 'backbone_transformer':
+         # 먼저, pre-trained transformer 가중치가 있는지 확인하고 로드합니다.
+        if args.transformer_weights:
+            print(f"Loading pretrained transformer weights from {args.transformer_weights}")
+            checkpoint = torch.load(args.transformer_weights, map_location='cpu')
 
-    unfrozen_param_count = 0
-    frozen_param_count = 0
+            # Transformer에 해당하는 state_dict만 추출
+            transformer_state_dict = {}
+            for k, v in checkpoint['model'].items():
+                if k.startswith('transformer'):
+                    transformer_state_dict[k] = v
 
-    # 모델의 모든 파라미터 이름을 출력합니다.
-    for name, param in model_without_ddp.named_parameters():
-        # 'backbone'으로 시작하는지 확인합니다.
-        if name.startswith("backbone"):
-            print(f"  -> ✅ MATCH! 동결 대상: {name}")
-            param.requires_grad = False
-            # 동결을 하지 않는 것
-            # param.requires_grad = True
-            frozen_param_count += 1
-        else:
-            # 동결되지 않는 파라미터들
-            unfrozen_param_count += 1
-            # 너무 많이 출력되는 것을 막기 위해 일부만 출력
-            if unfrozen_param_count < 10:
-                print(f"  -> ❌ SKIP! 학습 대상: {name}")
-            elif unfrozen_param_count == 10:
-                print("  -> (이하 학습 대상 파라미터는 생략)...")
+            # strict=False로 하여 transformer 가중치만 로드
+            msg = model_without_ddp.load_state_dict(transformer_state_dict, strict=False)
+            print("Transformer weights loading message:", msg)
+    
+        for name, param in model_without_ddp.named_parameters():
+            if name.startswith("backbone") or name.startswith("transformer"):
+                param.requires_grad = False
+    
+    # args.freeze_mode가 'none'인 경우, 아무것도 하지 않고 모든 파라미터를 학습합니다.
 
-    print("="*60)
-    if frozen_param_count == 0:
-        print("‼️ 경고: 'backbone'으로 시작하는 파라미터를 찾지 못했습니다!")
-        print("   모델의 feature extractor 이름이 다를 수 있습니다.")
-    else:
-        print(f"성공: {frozen_param_count}개의 파라미터 그룹을 동결했습니다.")
-    print("="*60 + "\n")
-
-
-    # [확인용] 동결 후 학습 가능한 파라미터 수를 다시 출력합니다.
+    # [확인용] 동결 후 실제 학습될 파라미터 수를 출력합니다.
     n_parameters_after_freezing = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f'Original params: {n_parameters}')
-    print(f'Trainable params after freezing: {n_parameters_after_freezing}')
+    print(f"Parameters to be trained: {n_parameters_after_freezing} (Total: {n_parameters})")
+
+    # 2. 학습할 파라미터('requires_grad=True'인 파라미터)만 Optimizer에 전달합니다.
+    param_dicts = [
+        {"params": [p for p in model_without_ddp.parameters() if p.requires_grad]}
+    ]
+
+    # 3. Optimizer를 생성합니다.
+    if args.sgd:
+        optimizer = torch.optim.SGD(param_dicts, lr=args.lr, momentum=0.9,
+                                    weight_decay=args.weight_decay)
+    else:
+        optimizer = torch.optim.AdamW(param_dicts, lr=args.lr,
+                                      weight_decay=args.weight_decay)
+    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args.lr_drop)
 
     dataset_train, dataset_val = get_datasets(args)
     
