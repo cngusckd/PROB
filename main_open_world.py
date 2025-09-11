@@ -383,7 +383,7 @@ def get_args_parser():
     parser.add_argument('--eval', action='store_true')
     parser.add_argument('--viz', action='store_true')
     parser.add_argument('--eval_every', default=1, type=int)
-    parser.add_argument('--num_workers', default=4, type=int)
+    parser.add_argument('--num_workers', default=0, type=int)
     parser.add_argument('--cache_mode', default=False, action='store_true', help='whether to cache images on memory')
     
     ################ OW-DETR ################
@@ -402,8 +402,8 @@ def get_args_parser():
     parser.add_argument('--num_classes', default=81, type=int)
     parser.add_argument('--nc_epoch', default=0, type=int)
     parser.add_argument('--dataset', default='OWDETR', help='defines which dataset is used. Built for: {TOWOD, OWDETR, VOC2007}')
-    # parser.add_argument('--data_root', default='../data/CLAD_PROB_FORMAT/data/OWOD', type=str)
-    parser.add_argument('--data_root', default='../data/PROB', type=str)
+    parser.add_argument('--data_root', default='../data/CLAD_PROB_FORMAT/data/OWOD', type=str)
+    # parser.add_argument('--data_root', default='../data/PROB', type=str)
     parser.add_argument('--unk_conf_w', default=1.0, type=float)
 
     ################ PROB OWOD ################
@@ -584,9 +584,16 @@ def main(args):
                 if k.startswith('transformer'):
                     transformer_state_dict[k] = v
 
+            del checkpoint
+            import gc
+            gc.collect()
+
             # strict=False로 하여 transformer 가중치만 로드
             msg = model_without_ddp.load_state_dict(transformer_state_dict, strict=False)
             print("Transformer weights loading message:", msg)
+
+            del transformer_state_dict
+            gc.collect()
     
         for name, param in model_without_ddp.named_parameters():
             if name.startswith("backbone") or name.startswith("transformer"):
