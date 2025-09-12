@@ -1,0 +1,829 @@
+# ------------------------------------------------------------------------
+# PROB: Probabilistic Objectness for Open World Object Detection 
+# Orr Zohar, Jackson Wang, Serena Yeung
+# -----------------------------------------------------------------------
+# Modified from OW-DETR: Open-world Detection Transformer
+# Akshita Gupta^, Sanath Narayan^, K J Joseph, Salman Khan, Fahad Shahbaz Khan, Mubarak Shah
+# https://arxiv.org/pdf/2112.01513.pdf
+# ------------------------------------------------------------------------
+# Modified from Deformable DETR (https://github.com/fundamentalvision/Deformable-DETR)
+# Copyright (c) 2020 SenseTime. All Rights Reserved.
+# ------------------------------------------------------------------------
+
+import argparse
+import datetime
+import json
+import random
+import time
+from pathlib import Path
+import os
+import numpy as np
+import torch
+from torch.utils.data import DataLoader
+import datasets
+import util.misc as utils
+import datasets.samplers as samplers
+from datasets import build_dataset, get_coco_api_from_dataset
+from datasets.coco import make_coco_transforms
+from datasets.torchvision_datasets.open_world import OWDetection
+from engine import evaluate, get_exemplar_replay # train_one_epoch
+# from logging_test import train_one_epoch
+from models import build_model
+
+from memory_profiler import profile
+
+########################
+########################
+## NEW
+
+def custom_coco_transform(image_set, custom_scales, custom_max_size):
+    # args.custom_scales = [480, 512, 544, 576, 608, 640, 672, 704, 736, 768, 800]
+    # args.custom_max_size = 1333
+    import datasets.transforms as T
+    normalize = T.Compose([
+        T.ToTensor(),
+        T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    ])
+
+    # scales = [480, 512, 544, 576, 608, 640, 672, 704, 736, 768, 800]
+    scales = custom_scales
+    
+    t=[]
+    
+    if 'train' in image_set:
+        t.append(['train'])
+        t.append(T.Compose([
+            T.RandomHorizontalFlip(),
+            T.RandomSelect(
+                # T.RandomResize(scales, max_size=1333),
+                T.RandomResize(scales, max_size = custom_max_size),
+                T.Compose([
+                    T.RandomResize([400, 500, 600]),
+                    T.RandomSizeCrop(384, 600),
+                    # T.RandomResize(scales, max_size=1333),
+                    T.RandomResize(scales, max_size=custom_max_size),
+                ])
+            ),
+            normalize,
+        ]))
+        return t
+    
+    if 'ft' in image_set:
+        t.append(['ft'])
+        t.append(T.Compose([
+            T.RandomHorizontalFlip(),
+            T.RandomSelect(
+                # T.RandomResize(scales, max_size=1333),
+                T.RandomResize(scales, max_size=custom_max_size),
+                T.Compose([
+                    T.RandomResize([400, 500, 600]),
+                    T.RandomSizeCrop(384, 600),
+                    # T.RandomResize(scales, max_size=1333),
+                    T.RandomResize(scales, max_size=custom_max_size),
+                ])
+            ),
+            normalize,
+        ]))
+        return t
+    
+    if 'val' in image_set:
+        t.append(['val'])
+        t.append(T.Compose([
+            T.RandomResize([800], max_size=custom_max_size),
+            normalize,
+        ]))
+        return t
+
+    if 'test' in image_set:
+        t.append(['test'])
+        t.append(T.Compose([
+            T.RandomResize([800], max_size=custom_max_size),
+            normalize,
+        ]))
+        return t
+    raise ValueError(f'unknown {image_set}')
+    
+from resource import getrusage, RUSAGE_CHILDREN, RUSAGE_SELF
+import psutil
+
+# CPU 메모리 측정
+def get_memory_mb():
+    """
+    Get both current (real-time) and peak memory usage of the current process and its children.
+
+    Returns:
+        dict: A dictionary containing the memory usage of the current process and its children.
+
+        The dictionary has the following keys:
+            - self: The peak memory usage of the current process (기존).
+            - children: The peak memory usage of the children of the current process (기존).
+            - total: The total peak memory usage of the current process and its children (기존).
+            - current_self: The current real-time memory usage of the current process (새로 추가).
+            - current_children: The current real-time memory usage of the children (새로 추가).
+            - current_total: The current real-time total memory usage (새로 추가).
+    """
+    # 기존 peak 메모리 (누적 최대값)
+    peak_self = getrusage(RUSAGE_SELF).ru_maxrss / 1024
+    peak_children = getrusage(RUSAGE_CHILDREN).ru_maxrss / 1024
+    
+    # 실시간 현재 메모리 사용량
+    process = psutil.Process(os.getpid())
+    current_self = process.memory_info().rss / (1024 * 1024)  # MB
+    
+    # 자식 프로세스들의 현재 메모리
+    current_children = 0
+    try:
+        for child in process.children(recursive=True):
+            try:
+                current_children += child.memory_info().rss / (1024 * 1024)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+    except:
+        current_children = 0
+    
+    res = {
+        # 기존 peak 메모리 (호환성 유지)
+        "self": peak_self,
+        "children": peak_children,
+        "total": peak_self + peak_children,
+        
+        # 새로 추가된 실시간 메모리
+        "current_self": current_self,
+        "current_children": current_children,
+        "current_total": current_self + current_children
+    }
+    return res
+
+from typing import Iterable
+from datasets.data_prefetcher import data_prefetcher
+
+import pynvml
+def get_my_gpu_memory_usage():
+    my_pid = os.getpid()
+    pynvml.nvmlInit()
+    usage_entries = []
+
+    for dev_id in range(pynvml.nvmlDeviceGetCount()):
+        handle = pynvml.nvmlDeviceGetHandleByIndex(dev_id)
+        try:
+            procs = pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
+        except pynvml.NVMLError:
+            continue
+
+        for proc in procs:
+            if proc.pid == my_pid:
+                mem_mb = proc.usedGpuMemory / (1024 * 1024)
+                usage_entries.append((dev_id, mem_mb))
+
+    pynvml.nvmlShutdown()
+
+    return usage_entries
+
+import math
+import sys
+from copy import deepcopy
+
+@profile
+def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
+                    data_loader: Iterable, optimizer: torch.optim.Optimizer,
+                    device: torch.device, epoch: int, nc_epoch: int, max_norm: float = 0, wandb: object = None):
+    
+    model.train()
+    criterion.train()
+    metric_logger = utils.MetricLogger(delimiter="  ")
+    metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
+    metric_logger.add_meter('class_error', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
+    metric_logger.add_meter('grad_norm', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
+    header = 'Epoch: [{}]'.format(epoch)
+    print_freq = 10
+    prefetcher = data_prefetcher(data_loader, device, prefetch=True)
+    samples, targets = prefetcher.next()
+
+    for _idx, _ in enumerate(metric_logger.log_every(range(len(data_loader)), print_freq, header)):
+
+        if args.model_type == 'prob':
+            outputs = model(samples)
+        elif args.model_type == 'lite':
+            outputs = model(samples, targets)
+            
+        # Forward 후 메모리 측정
+        after_forward_memory = get_memory_mb()
+        after_forward_gpu_usage = get_my_gpu_memory_usage()[0][1]
+        after_forward_gpu_allocated = torch.cuda.memory_allocated(device)
+        after_forward_gpu_reserved = torch.cuda.memory_reserved(device)
+        after_forward_gpu_max_allocated = torch.cuda.max_memory_allocated(device)
+        
+        loss_dict = criterion(outputs, targets) 
+        weight_dict = deepcopy(criterion.weight_dict)
+        
+        ## condition for starting nc loss computation after certain epoch so that the F_cls branch has the time
+        ## to learn the within classes seperation.
+        if epoch < nc_epoch: 
+            for k,v in weight_dict.items():
+                if 'NC' in k:
+                    weight_dict[k] = 0
+         
+        losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
+        # reduce losses over all GPUs for logging purposes
+
+        loss_dict_reduced = utils.reduce_dict(loss_dict)
+        ## Just printing NOt affectin gin loss function
+        loss_dict_reduced_unscaled = {f'{k}_unscaled': v
+                                      for k, v in loss_dict_reduced.items()}
+        loss_dict_reduced_scaled = {k: v * weight_dict[k]
+                                    for k, v in loss_dict_reduced.items() if k in weight_dict}
+        losses_reduced_scaled = sum(loss_dict_reduced_scaled.values())
+ 
+        loss_value = losses_reduced_scaled.item()
+ 
+        if not math.isfinite(loss_value):
+            print("Loss is {}, stopping training".format(loss_value))
+            print(loss_dict_reduced)
+            sys.exit(1)
+ 
+        optimizer.zero_grad()
+        losses.backward()
+        
+        # Backward 후 메모리 측정
+        after_backward_memory = get_memory_mb()
+        after_backward_gpu_usage = get_my_gpu_memory_usage()[0][1]
+        after_backward_gpu_allocated = torch.cuda.memory_allocated(device)
+        after_backward_gpu_reserved = torch.cuda.memory_reserved(device)
+        after_backward_gpu_max_allocated = torch.cuda.max_memory_allocated(device)
+        
+        if max_norm > 0:
+            grad_total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+        else:
+            grad_total_norm = utils.get_total_grad_norm(model.parameters(), max_norm)
+        optimizer.step()
+
+        wandb.log({
+            # 기존 CPU 메모리 (peak 값들)
+            "After Forward CPU Usage (Peak)" : after_forward_memory['total'],
+            "After Backward CPU Usage (Peak)" : after_backward_memory['total'],
+            
+            # 새로 추가된 실시간 CPU 메모리 
+            "After Forward CPU Usage (Current)" : after_forward_memory['current_total'],
+            "After Backward CPU Usage (Current)" : after_backward_memory['current_total'],
+            "After Forward CPU Self (Current)" : after_forward_memory['current_self'],
+            "After Forward CPU Children (Current)" : after_forward_memory['current_children'],
+            "After Backward CPU Self (Current)" : after_backward_memory['current_self'],
+            "After Backward CPU Children (Current)" : after_backward_memory['current_children'],
+            
+            # 기존 GPU 메모리들
+            'After Forward GPU(with pynvml) Usage' : float(f"{after_forward_gpu_usage}"),
+            "After Forward GPU(with torch.cuda.memory_allocated()) Usage" : float(f"{after_forward_gpu_allocated / 1024 ** 2:.2f}"),
+            "After Forward GPU(with torch.cuda.memory_reserved()) Usage" : float(f"{after_forward_gpu_reserved / 1024 ** 2:.2f}"),
+            "After Forward GPU(with torch.cuda.max_memory_allocated()) Usage" : float(f"{after_forward_gpu_max_allocated / 1024 ** 2:.2f}"),
+            "After Backward GPU(with pynvml) Usage" : float(f"{after_backward_gpu_usage}"),
+            "After Backward GPU(with torch.cuda.memory_allocated()) Usage" : float(f"{after_backward_gpu_allocated / 1024 ** 2:.2f}"),
+            "After Backward GPU(with torch.cuda.memory_reserved()) Usage" : float(f"{after_backward_gpu_reserved / 1024 ** 2:.2f}"),
+            "After Backward GPU(with torch.cuda.max_memory_allocated()) Usage" : float(f"{after_backward_gpu_max_allocated / 1024 ** 2:.2f}"),
+        })
+
+        '''
+
+        # 다 MB 단위
+        cpu_res = get_memory_mb()['total']
+        gpu_memory_history.append(print_gpu_utilization())
+        # 현재 디바이스 설정
+        device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+
+        # 현재 할당된 메모리 (바이트 단위)
+        allocated = torch.cuda.memory_allocated(device)
+
+        # 현재 예약된 메모리 (바이트 단위)
+        reserved = torch.cuda.memory_reserved(device)
+
+        # 최대 할당된 메모리 (바이트 단위)
+        max_allocated = torch.cuda.max_memory_allocated(device)
+
+        # 최대 예약된 메모리 (바이트 단위)
+        max_reserved = torch.cuda.max_memory_reserved(device)
+        print("Used CPU memory : ", cpu_res, ' MB')
+
+        wandb.log({
+            "Used CPU memory" : cpu_res,
+            'Allocated GPU memory' : float(f"{allocated / 1024 ** 2:.2f}"),
+            "Reserved GPU memory" : float(f"{reserved / 1024 ** 2:.2f}"),
+            "MAX Allocated GPU memory" : float(f"{max_allocated / 1024 ** 2:.2f}"),
+            "MAX Reserved GPU memory" : float(f"{max_reserved / 1024 ** 2:.2f}"),
+            "gpustat GPU memory" : float(gpu_memory_history[-1]) 
+        })
+        '''
+        if wandb is not None:
+            wandb.log({"total_loss":loss_value})
+            wandb.log(loss_dict_reduced_scaled)
+            wandb.log(loss_dict_reduced_unscaled)
+        metric_logger.update(loss=loss_value, **loss_dict_reduced_scaled, **loss_dict_reduced_unscaled)
+        metric_logger.update(class_error=loss_dict_reduced['class_error'])
+        metric_logger.update(lr=optimizer.param_groups[0]["lr"])
+        metric_logger.update(grad_norm=grad_total_norm)
+        
+        
+        samples, targets = prefetcher.next()
+
+
+        # if _idx == 10 :
+        #     # gpu_memory_history = np.array(gpu_memory_history)
+        #     # print('평균 사용량', np.mean(gpu_memory_history))
+        #     # print('최대 사용량', np.max(gpu_memory_history))
+        #     # print('최소 사용량', np.min(gpu_memory_history))
+        #     break
+
+    # gather the stats from all processes
+    metric_logger.synchronize_between_processes()
+    print("Averaged stats:", metric_logger)
+    return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+
+
+def get_args_parser():
+    parser = argparse.ArgumentParser('Deformable DETR Detector', add_help=False)
+    ################ Deformable DETR ################
+    parser.add_argument('--lr', default=2e-4, type=float)
+    parser.add_argument('--lr_backbone_names', default=["backbone.0"], type=str, nargs='+')
+    parser.add_argument('--lr_backbone', default=2e-5, type=float)
+    parser.add_argument('--lr_linear_proj_names', default=['reference_points', 'sampling_offsets'], type=str, nargs='+')
+    parser.add_argument('--lr_linear_proj_mult', default=0.1, type=float)
+    parser.add_argument('--batch_size', default=4, type=int)
+    parser.add_argument('--weight_decay', default=1e-4, type=float)
+    parser.add_argument('--epochs', default=51, type=int)
+    parser.add_argument('--lr_drop', default=35, type=int)
+    parser.add_argument('--lr_drop_epochs', default=None, type=int, nargs='+')
+    parser.add_argument('--clip_max_norm', default=0.1, type=float,
+                        help='gradient clipping max norm')
+    parser.add_argument('--sgd', action='store_true')
+    # Variants of Deformable DETR
+    parser.add_argument('--with_box_refine', default=False, action='store_true')
+    parser.add_argument('--two_stage', default=False, action='store_true')
+    parser.add_argument('--masks', default=False, action='store_true', help="Train segmentation head if the flag is provided")
+    parser.add_argument('--backbone', default='dino_resnet50', type=str, help="Name of the convolutional backbone to use")
+
+    # Model parameters
+    parser.add_argument('--frozen_weights', type=str, default=None,
+                        help="Path to the pretrained model. If set, only the mask head will be trained")
+    parser.add_argument('--dilation', action='store_true',
+                        help="If true, we replace stride with dilation in the last convolutional block (DC5)")
+    parser.add_argument('--position_embedding', default='sine', type=str, choices=('sine', 'learned'),
+                        help="Type of positional embedding to use on top of the image features")
+    parser.add_argument('--position_embedding_scale', default=2 * np.pi, type=float,
+                        help="position / size * scale")
+    parser.add_argument('--num_feature_levels', default=4, type=int, help='number of feature levels')
+
+    # * Transformer
+    # parser.add_argument('--enc_layers', default=6, type=int,
+    #                     help="Number of encoding layers in the transformer")
+    # parser.add_argument('--dec_layers', default=6, type=int,
+    #                     help="Number of decoding layers in the transformer")
+    parser.add_argument('--enc_layers', default = 4, type=int,
+                        help="Number of encoding layers in the transformer")
+    parser.add_argument('--dec_layers', default = 4, type=int,
+                        help="Number of decoding layers in the transformer")
+    # parser.add_argument('--dim_feedforward', default=1024, type=int,
+                        # help="Intermediate size of the feedforward layers in the transformer blocks")
+    parser.add_argument('--dim_feedforward', default=256, type=int,
+                        help="Intermediate size of the feedforward layers in the transformer blocks")
+    # parser.add_argument('--hidden_dim', default=256, type=int,
+                        # help="Size of the embeddings (dimension of the transformer)")
+    parser.add_argument('--hidden_dim', default=64, type=int,
+                        help="Size of the embeddings (dimension of the transformer)")
+    # parser.add_argument('--dropout', default=0.1, type=float,
+    #                     help="Dropout applied in the transformer")
+    parser.add_argument('--dropout', default=0.2, type=float,
+                        help="Dropout applied in the transformer")
+    parser.add_argument('--nheads', default=8, type=int,
+                        help="Number of attention heads inside the transformer's attentions")
+    parser.add_argument('--num_queries', default=100, type=int,
+                        help="Number of query slots")
+    parser.add_argument('--dec_n_points', default=4, type=int)
+    parser.add_argument('--enc_n_points', default=4, type=int)
+
+    # Loss
+    parser.add_argument('--no_aux_loss', dest='aux_loss', action='store_false',
+                        help="Disables auxiliary decoding losses (loss at each layer)")
+    # * Matcher
+    parser.add_argument('--set_cost_class', default=2, type=float,
+                        help="Class coefficient in the matching cost")
+    parser.add_argument('--set_cost_bbox', default=5, type=float,
+                        help="L1 box coefficient in the matching cost")
+    parser.add_argument('--set_cost_giou', default=2, type=float,
+                        help="giou box coefficient in the matching cost")
+    # Loss coefficients
+    parser.add_argument('--cls_loss_coef', default=2, type=float)
+    parser.add_argument('--bbox_loss_coef', default=5, type=float)
+    parser.add_argument('--giou_loss_coef', default=2, type=float)
+    parser.add_argument('--focal_alpha', default=0.25, type=float)
+    
+    # dataset parameters
+    parser.add_argument('--coco_panoptic_path', type=str)
+    parser.add_argument('--remove_difficult', action='store_true')
+    parser.add_argument('--output_dir', default='',
+                        help='path where to save, empty for no saving')
+    parser.add_argument('--device', default='cuda',
+                        help='device to use for training / testing')
+    parser.add_argument('--seed', default=42, type=int)
+    parser.add_argument('--resume', default='', help='resume from checkpoint')
+    parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
+                        help='start epoch')
+    parser.add_argument('--eval', action='store_true')
+    parser.add_argument('--viz', action='store_true')
+    parser.add_argument('--eval_every', default=1, type=int)
+    parser.add_argument('--num_workers', default = 0, type=int)
+    parser.add_argument('--cache_mode', default=False, action='store_true', help='whether to cache images on memory')
+    
+    ################ OW-DETR ################
+    parser.add_argument('--PREV_INTRODUCED_CLS', default=0, type=int)
+    parser.add_argument('--CUR_INTRODUCED_CLS', default=20, type=int)
+    parser.add_argument('--unmatched_boxes', default=False, action='store_true')
+    parser.add_argument('--top_unk', default=5, type=int)
+    parser.add_argument('--featdim', default=1024, type=int)
+    parser.add_argument('--invalid_cls_logits', default=False, action='store_true', help='owod setting')
+    parser.add_argument('--NC_branch', default=False, action='store_true')
+    parser.add_argument('--bbox_thresh', default=0.3, type=float)
+    parser.add_argument('--pretrain', default='', help='initialized from the pre-training model')
+    parser.add_argument('--nc_loss_coef', default=2, type=float)
+    parser.add_argument('--train_set', default='', help='training txt files')
+    parser.add_argument('--test_set', default='', help='testing txt files')
+    parser.add_argument('--num_classes', default=81, type=int)
+    parser.add_argument('--nc_epoch', default=0, type=int)
+    parser.add_argument('--dataset', default='OWDETR', help='defines which dataset is used. Built for: {TOWOD, OWDETR, VOC2007}')
+    parser.add_argument('--data_root', default='../data/CLAD_PROB_FORMAT/data/OWOD', type=str)
+    # parser.add_argument('--data_root', default='./data/OWOD', type=str)
+    parser.add_argument('--unk_conf_w', default=1.0, type=float)
+
+    ################ PROB OWOD ################
+    # model config
+    parser.add_argument('--model_type', default='prob', type=str)
+    parser.add_argument('--lite_model', default='', type=str)
+    
+    # logging
+    parser.add_argument('--wandb_name', default='', type=str)
+    parser.add_argument('--wandb_project', default='', type=str)
+    
+    # model hyperparameters
+    parser.add_argument('--obj_loss_coef', default=1, type=float)
+    parser.add_argument('--obj_temp', default=1, type=float)
+    parser.add_argument('--freeze_prob_model', default=False, action='store_true', help='freeze model probabistic estimation')
+
+    
+    # Exemplar replay selection
+    parser.add_argument('--num_inst_per_class', default=50, type=int, help="number of instances per class")
+    parser.add_argument('--exemplar_replay_selection', default=False, action='store_true', help='use learned exemplar selection')
+    parser.add_argument('--exemplar_replay_max_length', default=1e10, type=int, help="max number of images that can be saves")
+    parser.add_argument('--exemplar_replay_dir', default='', type=str, help="directory of exemplar replay txt files")
+    parser.add_argument('--exemplar_replay_prev_file', default='', type=str, help="path to previous ft file")
+    parser.add_argument('--exemplar_replay_cur_file', default='', type=str, help="path to current ft file")
+    parser.add_argument('--exemplar_replay_random', default=False, action='store_true', help='make selection random')
+    
+    # CUSTOM
+    parser.add_argument('--custom_scales', default=[480, 512, 544, 576, 608, 640, 672, 704, 736, 768, 800], type=list, help="path to current ft file")
+    parser.add_argument('--custom_max_size', default=1333, type=int, help="path to current ft file")
+    
+    # parser.add_argument('--custom_scales', default=[480, 512, 544, 576, 608, 640], type=list, help="path to current ft file")
+    # parser.add_argument('--custom_max_size', default=1080, type=int, help="path to current ft file")
+
+    ################ Lite-DETR ################
+    parser.add_argument('--decoder_layer_noise', default=False, type=bool, help='add perturbation to decoder query')
+    parser.add_argument('--dln_xy_noise', default=0.2, type=float, help='decoder layer noise for xy')
+    parser.add_argument('--dln_hw_noise', default=0.2, type=float, help='decoder layer noise for hw')
+    parser.add_argument("--use_detached_boxes_dec_out", action="store_true")
+
+    parser.add_argument("--dim_feedforward_enc", default=2048, type=int)
+    parser.add_argument("--unic_layers", default=0, type=int)
+    parser.add_argument("--pre_norm", action="store_true")
+    parser.add_argument("--query_dim", default=4, type=int)
+    parser.add_argument("--transformer_activation", default="relu", type=str)
+    parser.add_argument("--num_patterns", default=0, type=int)
+
+    parser.add_argument("--use_deformable_box_attn", action="store_true")
+    parser.add_argument("--box_attn_type", default="roi_align", type=str)
+
+    parser.add_argument("--add_channel_attention", action="store_true")
+    parser.add_argument("--add_pos_value", action="store_true")
+    parser.add_argument("--random_refpoints_xy", action="store_true")
+
+    parser.add_argument("--two_stage_type", default="standard", type=str)  # ['no', 'standard', 'early']
+    parser.add_argument("--two_stage_pat_embed", default=0, type=int)
+    parser.add_argument("--two_stage_add_query_num", default=0, type=int)
+    parser.add_argument("--two_stage_learn_wh", action="store_true")
+    parser.add_argument("--two_stage_keep_all_tokens", action="store_true")
+    parser.add_argument("--dec_layer_number", default=None, type=str)  # stringified list
+
+    parser.add_argument("--decoder_sa_type", default="sa", type=str)
+    parser.add_argument("--decoder_module_seq", default=['sa', 'ca', 'ffn'], type=str)
+    parser.add_argument("--embed_init_tgt", default=True, type=bool)
+    parser.add_argument("--enc_scale", default=3, type=int)
+    parser.add_argument("--dim_feedforward_dec", default=2048, type=int)
+    parser.add_argument("--use_pytorch_version", action="store_true")
+    parser.add_argument("--value_proj_after", action="store_true")
+    parser.add_argument("--small_expand", action="store_true")
+    parser.add_argument("--num_expansion", default=3, type=int)
+    parser.add_argument("--deformable_use_checkpoint", action="store_true")
+    parser.add_argument("--same_loc", default=True, type=bool)
+    parser.add_argument("--proj_key", action="store_true")
+    parser.add_argument("--key_aware", default=True, type=bool)
+    # for dn
+    parser.add_argument("--use_dn", default=True, type=bool) # action="store_true") # True
+    parser.add_argument("--dn_number", default=100, type=int)
+    parser.add_argument("--dn_box_noise_scale", default=1.0, type=float)
+    parser.add_argument("--dn_label_noise_ratio", default=0.5, type=float)
+    parser.add_argument("--dn_labelbook_size", default=91, type=int)
+    parser.add_argument("--match_unstable_error", default=None, type=str)
+
+    parser.add_argument('--fix_refpoints_hw', default=-1, type=float, help='-1 for learnable refpoint w/h, -2 for shared w/h, >0 for fixed w/h')
+    parser.add_argument('--two_stage_bbox_embed_share', action='store_true', help='Whether to share bbox embed layer between encoder and decoder in two-stage mode')
+    parser.add_argument('--two_stage_class_embed_share', action='store_true', help='Share class embed between encoder and decoder')
+    parser.add_argument('--two_stage_prob_obj_head_share', action='store_true', help='Share objectness head between encoder and decoder')
+    
+    parser.add_argument('--num_select', default=20, type=int,
+                        help='Top-K predictions to keep per image for evaluation (작은 데이터셋이면 20~50 추천)')
+    parser.add_argument('--nms_iou_threshold', default=0.5, type=float,
+                        help='IoU threshold for NMS. -1 means no NMS. 작은 데이터셋에서는 0.3~0.5 추천')
+
+    parser.add_argument('--dec_pred_prob_obj_head_share', default=True, type=bool)
+    # === build() 내부에서 args.interm_loss_coef 참조하는 코드가 있어 필요한 옵션 ===
+    parser.add_argument('--interm_loss_coef', default=1.0, type=float)
+    parser.add_argument('--no_interm_box_loss', action='store_true')
+
+    # === 추가적으로 작은 데이터셋에 적합한 설정 추천 ===
+    parser.add_argument('--overfit_single_batch', action='store_true', help='Debug mode: train on a single batch repeatedly')
+    parser.add_argument('--max_train_images', default=None, type=int, help='Limit number of training images (for small datasets)')
+    parser.add_argument('--debug_eval_images', default=100, type=int, help='Limit number of images for eval (for small datasets)')
+    parser.add_argument('--log_interval', default=10, type=int, help='Logging interval for training batches')
+    parser.add_argument('--small_dataset', action='store_true', help='Apply small dataset strategy like no-lr-warmup or short epochs')
+
+    # === Lite-DETR build()에서 예외 처리 없이 쓰는 항목 ===
+    parser.add_argument('--enc_class_embed_share', default=True, type=bool)
+    parser.add_argument('--enc_bbox_embed_share', default=True, type=bool)
+    parser.add_argument('--enc_prob_obj_head_share', default=True, type=bool)
+
+
+
+    return parser
+
+def main(args):
+    ###
+    args.distributed = False
+    ###
+    import wandb
+    if len(args.wandb_project)>0:
+        if len(args.wandb_name)>0:
+            wandb.init(project=args.wandb_project, group=args.wandb_name, config = vars(args))
+            # wandb.init(project=args.wandb_project, entity="cngusckd", group=args.wandb_name)
+        else:
+            wandb.init(project=args.wandb_project, config = vars(args))
+            # wandb.init(project=args.wandb_project, entity="cngusckd")
+        wandb.config = args
+    else:
+        wandb=None
+    wandb.run.name = args.wandb_name
+    wandb.run.save()
+
+    utils.init_distributed_mode(args)
+    print("git:\n  {}\n".format(utils.get_sha()))
+
+    if args.frozen_weights is not None:
+        assert args.masks, "Frozen training is meant for segmentation only"
+    print(args)
+
+    device = torch.device(args.device)
+
+    # fix the seed for reproducibility
+    seed = args.seed + utils.get_rank()
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+
+    model, criterion, postprocessors, exemplar_selection = build_model(args, mode = args.model_type)
+    model.to(device)
+
+    model_without_ddp = model
+    print(model_without_ddp)
+    n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print('number of params:', n_parameters)
+
+    dataset_train = get_datasets(args)
+    
+    if args.distributed:
+        if args.cache_mode:
+            sampler_train = samplers.NodeDistributedSampler(dataset_train)
+        else:
+            sampler_train = samplers.DistributedSampler(dataset_train)
+    else:
+        sampler_train = torch.utils.data.RandomSampler(dataset_train)
+
+    batch_sampler_train = torch.utils.data.BatchSampler(sampler_train, args.batch_size, drop_last=True)
+    data_loader_train = DataLoader(dataset_train, batch_sampler=batch_sampler_train,
+                                   collate_fn=utils.collate_fn, num_workers=args.num_workers,
+                                   pin_memory=True)
+
+    # lr_backbone_names = ["backbone.0", "backbone.neck", "input_proj", "transformer.encoder"]
+    def match_name_keywords(n, name_keywords):
+        out = False
+        for b in name_keywords:
+            if b in n:
+                out = True
+                break
+        return out
+
+    param_dicts = [
+        {
+            "params":
+                [p for n, p in model_without_ddp.named_parameters()
+                 if not match_name_keywords(n, args.lr_backbone_names) and not match_name_keywords(n, args.lr_linear_proj_names) and p.requires_grad],
+            "lr": args.lr,
+        },
+        {
+            "params": [p for n, p in model_without_ddp.named_parameters() if match_name_keywords(n, args.lr_backbone_names) and p.requires_grad],
+            "lr": args.lr_backbone,
+        },
+        {
+            "params": [p for n, p in model_without_ddp.named_parameters() if match_name_keywords(n, args.lr_linear_proj_names) and p.requires_grad],
+            "lr": args.lr * args.lr_linear_proj_mult,
+        }
+    ]
+    if args.sgd:
+        optimizer = torch.optim.SGD(param_dicts, lr=args.lr, momentum=0.9,
+                                    weight_decay=args.weight_decay)
+    else:
+        optimizer = torch.optim.AdamW(param_dicts, lr=args.lr,
+                                      weight_decay=args.weight_decay)
+    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args.lr_drop)
+
+    if args.distributed:
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
+        model_without_ddp = model.module
+
+    if args.frozen_weights is not None:
+        checkpoint = torch.load(args.frozen_weights, map_location='cpu')
+        model_without_ddp.detr.load_state_dict(checkpoint['model'])
+
+    output_dir = Path(args.output_dir)
+
+    if args.pretrain:
+        print('Initialized from the pre-training model')
+        checkpoint = torch.load(args.pretrain, map_location='cpu')
+        state_dict = checkpoint['model']
+        msg = model_without_ddp.load_state_dict(state_dict, strict=False)
+        print(msg)
+        args.start_epoch = checkpoint['epoch'] + 1
+        
+    if args.resume:
+        if args.resume.startswith('https'):
+            checkpoint = torch.hub.load_state_dict_from_url(
+                args.resume, map_location='cpu', check_hash=True)
+        else:
+            checkpoint = torch.load(args.resume, map_location='cpu')
+        missing_keys, unexpected_keys = model_without_ddp.load_state_dict(checkpoint['model'], strict=False)
+        unexpected_keys = [k for k in unexpected_keys if not (k.endswith('total_params') or k.endswith('total_ops'))]
+        if len(missing_keys) > 0:
+            print('Missing Keys: {}'.format(missing_keys))
+        if len(unexpected_keys) > 0:
+            print('Unexpected Keys: {}'.format(unexpected_keys))
+        if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
+            import copy
+            p_groups = copy.deepcopy(optimizer.param_groups)
+            optimizer.load_state_dict(checkpoint['optimizer'])
+            for pg, pg_old in zip(optimizer.param_groups, p_groups):
+                pg['lr'] = pg_old['lr']
+                pg['initial_lr'] = pg_old['initial_lr']
+            print(optimizer.param_groups)
+            lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
+            # todo: this is a hack for doing experiment that resume from checkpoint and also modify lr scheduler (e.g., decrease lr in advance).
+            args.override_resumed_lr_drop = True
+            if args.override_resumed_lr_drop:
+                print('Warning: (hack) args.override_resumed_lr_drop is set to True, so args.lr_drop would override lr_drop in resumed lr_scheduler.')
+                lr_scheduler.step_size = args.lr_drop
+                lr_scheduler.base_lrs = list(map(lambda group: group['initial_lr'], optimizer.param_groups))
+            lr_scheduler.step(lr_scheduler.last_epoch)
+            args.start_epoch = checkpoint['epoch'] + 1
+        
+    if args.freeze_prob_model:           
+        if isinstance(model_without_ddp.prob_obj_head, torch.nn.ModuleList):
+            for obj_head in model_without_ddp.prob_obj_head:
+                obj_head.freeze_prob_model()
+        else:
+            model_without_ddp.prob_obj_head.freeze_prob_model()
+            
+        obj_bn_mean_before=model_without_ddp.prob_obj_head[0].objectness_bn.running_mean
+    
+    print(f'Start training from epoch {args.start_epoch} to {args.epochs}')
+    start_time = time.time()
+    for epoch in range(args.start_epoch, args.epochs):
+        if args.distributed:
+            sampler_train.set_epoch(epoch)
+            
+        train_stats = train_one_epoch(
+            model, criterion, data_loader_train, optimizer, device, epoch, args.nc_epoch, args.clip_max_norm, wandb)
+            
+        lr_scheduler.step()
+        if args.output_dir:
+            checkpoint_paths = [output_dir / 'checkpoint.pth']
+            # extra checkpoint before LR drop and every 5 epochs
+            if (epoch + 1) % args.lr_drop == 0 or (epoch % args.eval_every == 0 or epoch == 0 or epoch == 1 or (args.epochs-epoch)<1):
+                checkpoint_paths.append(output_dir / f'checkpoint{epoch:04}.pth')
+                if wandb is not None:
+                    test_stats["metrics"]['epoch']=epoch
+                    wandb.log({str(key): val for key, val in test_stats["metrics"].items()})
+            elif epoch > args.epochs-6:
+                checkpoint_paths.append(output_dir / f'checkpoint{epoch:04}.pth')
+                
+            else:
+                 test_stats = {}
+                    
+            for checkpoint_path in checkpoint_paths:
+                utils.save_on_master({
+                    'model': model_without_ddp.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'lr_scheduler': lr_scheduler.state_dict(),
+                    'epoch': epoch,
+                    'args': args,
+                }, checkpoint_path)
+            
+    if args.exemplar_replay_selection:
+        image_sorted_scores = get_exemplar_replay(model,exemplar_selection, device, data_loader_train)
+        create_ft_dataset(args, image_sorted_scores)
+            
+    total_time = time.time() - start_time
+    total_time_str = str(datetime.timedelta(seconds=int(total_time)))
+    print('Training time {}'.format(total_time_str))
+    return
+
+def get_datasets(args):
+    print(args.dataset)
+
+    train_set = args.train_set
+    dataset_train = OWDetection(args, args.data_root, image_set=args.train_set, transforms=custom_coco_transform(args.train_set, args.custom_scales, args.custom_max_size), dataset = args.dataset)
+    
+    print(args.train_set)
+    print(dataset_train)
+    
+    return dataset_train
+
+
+def create_ft_dataset(args, image_sorted_scores):
+    print(f'found a total of {len(image_sorted_scores.keys())} images')
+    tmp_dir=args.data_root +'/ImageSets/'+args.dataset+"/"+args.exemplar_replay_dir+"/"
+    #tmp_dir=args.data_root +'/ImageSets/'+args.exemplar_replay_dir+"/"
+
+    class_sorted_scores={}
+    imgs_per_class={}
+    for i in range(args.PREV_INTRODUCED_CLS, args.CUR_INTRODUCED_CLS+args.PREV_INTRODUCED_CLS):
+        class_sorted_scores[str(i)]=[]
+        imgs_per_class[str(i)]=[]
+
+    for k,v in image_sorted_scores.items():
+        for j in range(len(v['labels'])):
+            class_sorted_scores[str(v['labels'][j])].append(v['scores'][j])
+
+
+    class_threshold={}
+    for i in range(args.PREV_INTRODUCED_CLS, args.CUR_INTRODUCED_CLS+args.PREV_INTRODUCED_CLS):
+        tmp=np.array(class_sorted_scores[str(i)])
+        tmp.sort()
+        tmp = torch.Tensor(tmp)
+        if len(tmp)>args.num_inst_per_class and not args.exemplar_replay_random:
+            max_val = tmp[-args.num_inst_per_class//2]
+            min_val = tmp[args.num_inst_per_class//2]
+        else:
+            if args.exemplar_replay_random:
+                print('using random exemplar selection')
+            else:
+                print(f'only found {len(tmp)} imgs in class {i}')
+            max_val = tmp.min()
+            min_val = tmp.max()
+            
+        class_threshold[str(i)]=(min_val, max_val)
+
+    save_imgs = []    
+    for k,v in image_sorted_scores.items():
+        for j in range(len(v['labels'])):
+            label = str(v['labels'][j])
+            if (v['scores'][j] <= class_threshold[label][0].numpy() or v['scores'][j] >= class_threshold[label][1].numpy()) and (len(imgs_per_class[label])<=args.num_inst_per_class+2):
+                save_imgs.append(k)
+                imgs_per_class[label].append(k)
+                        
+    print(f'found {len(np.unique(save_imgs))} images in run')
+    if len(args.exemplar_replay_prev_file)>0:
+        previous_ft = open(tmp_dir+args.exemplar_replay_prev_file,'r').read().splitlines()
+        save_imgs+=previous_ft
+        
+    save_imgs=np.unique(save_imgs)
+    np.random.shuffle(save_imgs)
+    if len(save_imgs)> args.exemplar_replay_max_length:
+        save_imgs=save_imgs[:args.exemplar_replay_max_length]
+    
+    os.makedirs(tmp_dir, exist_ok=True)
+    with open(tmp_dir+args.exemplar_replay_cur_file, 'w') as f:
+        for line in save_imgs:
+            f.write(line)
+            f.write('\n')
+    return
+    
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser('Deformable DETR training and evaluation script', parents=[get_args_parser()])
+    args = parser.parse_args()
+    if args.output_dir:
+        Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+    main(args)
