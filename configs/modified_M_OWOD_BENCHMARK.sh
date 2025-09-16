@@ -9,7 +9,7 @@ PY_ARGS=${@:1}
 PROJECT_NAME=Freeze
 WANDB_NAME=CLAD_SW
 REPLAY_NAME=learned_clad
-MODEL_TYPE=prob
+MODEL_TYPE=lite
 BATCH_SIZE=1
 FREEZE_MODEL=backbone
 EPOCHS=21
@@ -20,7 +20,7 @@ python -m memory_profiler main_open_world.py \
     --train_set 'clad_t1_train_2025ver' --test_set 'clad_test' --epochs ${EPOCHS} --transformer_weights 'none'\
     --model_type "${MODEL_TYPE}" --obj_loss_coef 8e-4 --obj_temp 1.3 --batch_size ${BATCH_SIZE} --freeze_mode ${FREEZE_MODEL}\
     --wandb_project ${PROJECT_NAME} --wandb_name "${WANDB_NAME}_t1" --exemplar_replay_selection --exemplar_replay_max_length 1000\
-    --exemplar_replay_dir ${WANDB_NAME} --exemplar_replay_cur_file "${REPLAY_NAME}_t1_ft.txt" --transformer_weights './checkpoint0049.pth'\
+    --exemplar_replay_dir ${WANDB_NAME} --exemplar_replay_cur_file "${REPLAY_NAME}_t1_ft.txt" --transformer_weights './PROB_transformer.pth'\
     ${PY_ARGS}
     
 
@@ -55,7 +55,7 @@ python -u main_open_world.py \
     --wandb_project "${PROJECT_NAME}" --wandb_name "${WANDB_NAME}_t3" --batch_size ${BATCH_SIZE} --freeze_mode ${FREEZE_MODEL}\
     --exemplar_replay_selection --exemplar_replay_max_length 1000 --exemplar_replay_dir ${WANDB_NAME}\
     --exemplar_replay_prev_file "${REPLAY_NAME}_t2_ft.txt" --exemplar_replay_cur_file "${REPLAY_NAME}_t3_ft.txt"\
-    --pretrain "${EXP_DIR}/t2/checkpoint00$((  EPOCHS + 19 )).pth" --lr 2e-5\
+    --pretrain "${EXP_DIR}/t3/checkpoint00$((  EPOCHS + 19 )).pth" --lr 2e-5\
     ${PY_ARGS}
 
 # fine-tune with t2 replay
