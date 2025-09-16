@@ -104,58 +104,30 @@ def custom_coco_transform(image_set, custom_scales, custom_max_size):
     raise ValueError(f'unknown {image_set}')
     
 from resource import getrusage, RUSAGE_CHILDREN, RUSAGE_SELF
-import psutil
 
 # CPU 메모리 측정
 def get_memory_mb():
     """
-    Get both current (real-time) and peak memory usage of the current process and its children.
+    Get the memory usage of the current process and its children.
 
     Returns:
         dict: A dictionary containing the memory usage of the current process and its children.
 
         The dictionary has the following keys:
-            - self: The peak memory usage of the current process (기존).
-            - children: The peak memory usage of the children of the current process (기존).
-            - total: The total peak memory usage of the current process and its children (기존).
-            - current_self: The current real-time memory usage of the current process (새로 추가).
-            - current_children: The current real-time memory usage of the children (새로 추가).
-            - current_total: The current real-time total memory usage (새로 추가).
+            - self: The memory usage of the current process.
+            - children: The memory usage of the children of the current process.
+            - total: The total memory usage of the current process and its children.
     """
-    # 기존 peak 메모리 (누적 최대값)
-    peak_self = getrusage(RUSAGE_SELF).ru_maxrss / 1024
-    peak_children = getrusage(RUSAGE_CHILDREN).ru_maxrss / 1024
-    
-    # 실시간 현재 메모리 사용량
-    process = psutil.Process(os.getpid())
-    current_self = process.memory_info().rss / (1024 * 1024)  # MB
-    
-    # 자식 프로세스들의 현재 메모리
-    current_children = 0
-    try:
-        for child in process.children(recursive=True):
-            try:
-                current_children += child.memory_info().rss / (1024 * 1024)
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                pass
-    except:
-        current_children = 0
-    
     res = {
-        # 기존 peak 메모리 (호환성 유지)
-        "self": peak_self,
-        "children": peak_children,
-        "total": peak_self + peak_children,
-        
-        # 새로 추가된 실시간 메모리
-        "current_self": current_self,
-        "current_children": current_children,
-        "current_total": current_self + current_children
+        "self": getrusage(RUSAGE_SELF).ru_maxrss / 1024,
+        "children": getrusage(RUSAGE_CHILDREN).ru_maxrss / 1024,
+        "total": getrusage(RUSAGE_SELF).ru_maxrss / 1024 + getrusage(RUSAGE_CHILDREN).ru_maxrss / 1024
     }
     return res
 
 from typing import Iterable
 from datasets.data_prefetcher import data_prefetcher
+
 
 import pynvml
 def get_my_gpu_memory_usage():
@@ -178,11 +150,9 @@ def get_my_gpu_memory_usage():
     pynvml.nvmlShutdown()
 
     return usage_entries
-
 import math
 import sys
 from copy import deepcopy
-
 @profile
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
@@ -205,9 +175,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             outputs = model(samples)
         elif args.model_type == 'lite':
             outputs = model(samples, targets)
-            
-        # Forward 후 메모리 측정
-        after_forward_memory = get_memory_mb()
+        after_forward_cpu_usage = get_memory_mb()['total']
         after_forward_gpu_usage = get_my_gpu_memory_usage()[0][1]
         after_forward_gpu_allocated = torch.cuda.memory_allocated(device)
         after_forward_gpu_reserved = torch.cuda.memory_reserved(device)
@@ -243,9 +211,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
  
         optimizer.zero_grad()
         losses.backward()
-        
-        # Backward 후 메모리 측정
-        after_backward_memory = get_memory_mb()
+        after_backward_cpu_usage = get_memory_mb()
         after_backward_gpu_usage = get_my_gpu_memory_usage()[0][1]
         after_backward_gpu_allocated = torch.cuda.memory_allocated(device)
         after_backward_gpu_reserved = torch.cuda.memory_reserved(device)
@@ -258,27 +224,16 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         optimizer.step()
 
         wandb.log({
-            # 기존 CPU 메모리 (peak 값들)
-            "After Forward CPU Usage (Peak)" : after_forward_memory['total'],
-            "After Backward CPU Usage (Peak)" : after_backward_memory['total'],
-            
-            # 새로 추가된 실시간 CPU 메모리 
-            "After Forward CPU Usage (Current)" : after_forward_memory['current_total'],
-            "After Backward CPU Usage (Current)" : after_backward_memory['current_total'],
-            "After Forward CPU Self (Current)" : after_forward_memory['current_self'],
-            "After Forward CPU Children (Current)" : after_forward_memory['current_children'],
-            "After Backward CPU Self (Current)" : after_backward_memory['current_self'],
-            "After Backward CPU Children (Current)" : after_backward_memory['current_children'],
-            
-            # 기존 GPU 메모리들
+            "After Forward CPU Usage" : after_forward_cpu_usage,
             'After Forward GPU(with pynvml) Usage' : float(f"{after_forward_gpu_usage}"),
             "After Forward GPU(with torch.cuda.memory_allocated()) Usage" : float(f"{after_forward_gpu_allocated / 1024 ** 2:.2f}"),
             "After Forward GPU(with torch.cuda.memory_reserved()) Usage" : float(f"{after_forward_gpu_reserved / 1024 ** 2:.2f}"),
             "After Forward GPU(with torch.cuda.max_memory_allocated()) Usage" : float(f"{after_forward_gpu_max_allocated / 1024 ** 2:.2f}"),
+            "After Backward CPU Usage" : after_backward_cpu_usage,
             "After Backward GPU(with pynvml) Usage" : float(f"{after_backward_gpu_usage}"),
             "After Backward GPU(with torch.cuda.memory_allocated()) Usage" : float(f"{after_backward_gpu_allocated / 1024 ** 2:.2f}"),
-            "After Backward GPU(with torch.cuda.memory_reserved()) Usage" : float(f"{after_backward_gpu_reserved / 1024 ** 2:.2f}"),
-            "After Backward GPU(with torch.cuda.max_memory_allocated()) Usage" : float(f"{after_backward_gpu_max_allocated / 1024 ** 2:.2f}"),
+            "After Forward GPU(with torch.cuda.memory_reserved()) Usage" : float(f"{after_backward_gpu_reserved / 1024 ** 2:.2f}"),
+            "After Forward GPU(with torch.cuda.max_memory_allocated()) Usage" : float(f"{after_backward_gpu_max_allocated / 1024 ** 2:.2f}"),
         })
 
         '''
@@ -428,7 +383,7 @@ def get_args_parser():
     parser.add_argument('--eval', action='store_true')
     parser.add_argument('--viz', action='store_true')
     parser.add_argument('--eval_every', default=1, type=int)
-    parser.add_argument('--num_workers', default=4, type=int)
+    parser.add_argument('--num_workers', default=0, type=int)
     parser.add_argument('--cache_mode', default=False, action='store_true', help='whether to cache images on memory')
     
     ################ OW-DETR ################
@@ -448,7 +403,7 @@ def get_args_parser():
     parser.add_argument('--nc_epoch', default=0, type=int)
     parser.add_argument('--dataset', default='OWDETR', help='defines which dataset is used. Built for: {TOWOD, OWDETR, VOC2007}')
     parser.add_argument('--data_root', default='../data/CLAD_PROB_FORMAT/data/OWOD', type=str)
-    # parser.add_argument('--data_root', default='./data/OWOD', type=str)
+    # parser.add_argument('--data_root', default='../data/PROB', type=str)
     parser.add_argument('--unk_conf_w', default=1.0, type=float)
 
     ################ PROB OWOD ################
@@ -481,6 +436,14 @@ def get_args_parser():
     
     # parser.add_argument('--custom_scales', default=[480, 512, 544, 576, 608, 640], type=list, help="path to current ft file")
     # parser.add_argument('--custom_max_size', default=1080, type=int, help="path to current ft file")
+    parser.add_argument('--freeze_mode', type=str, default='none',
+                        choices=['none', 'backbone', 'backbone_transformer'],
+                        help='Specify parts of the model to freeze during training. '
+                             '"none": train all parameters. '
+                             '"backbone": freeze only the backbone. '
+                             '"backbone_transformer": freeze both backbone and transformer.')
+    parser.add_argument('--transformer_weights', type=str, default=None,
+                            help='Path to the pretrained transformer weights, used when freeze_mode is backbone_transformer.')
 
     ################ Lite-DETR ################
     parser.add_argument('--decoder_layer_noise', default=False, type=bool, help='add perturbation to decoder query')
@@ -577,7 +540,7 @@ def main(args):
     else:
         wandb=None
     wandb.run.name = args.wandb_name
-    wandb.run.save()
+    # wandb.run.save()
 
     utils.init_distributed_mode(args)
     print("git:\n  {}\n".format(utils.get_sha()))
@@ -602,51 +565,80 @@ def main(args):
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print('number of params:', n_parameters)
 
-    # === Mode-specific Dataset Loading ===
-    # Train mode: Load only training dataset
-    # Eval mode: Load only evaluation dataset
-    if args.eval:
-        print('=== EVAL Mode: Loading evaluation dataset only ===')
-        _, dataset_val = get_datasets(args)
-        dataset_train = None
-    else:
-        print('=== TRAIN Mode: Loading training dataset only ===')
-        dataset_train, _ = get_datasets(args)
-        dataset_val = None
+   # 1. --freeze_mode 인자에 따라 파라미터를 조건부로 동결합니다.
+    print(f"Applying freeze mode: {args.freeze_mode}")
+    if args.freeze_mode == 'backbone':
+        for name, param in model_without_ddp.named_parameters():
+            if name.startswith("backbone"):
+                param.requires_grad = False
     
-    # === Mode-specific DataLoader Creation ===
-    data_loader_train = None
-    data_loader_val = None
-    
-    if args.eval:
-        # === EVAL Mode: Create evaluation dataloader only ===
-        if args.distributed:
-            if args.cache_mode:
-                sampler_val = samplers.NodeDistributedSampler(dataset_val, shuffle=False)
-            else:
-                sampler_val = samplers.DistributedSampler(dataset_val, shuffle=False)
-        else:
-            sampler_val = torch.utils.data.SequentialSampler(dataset_val)
-            
-        data_loader_val = DataLoader(dataset_val, args.batch_size, sampler=sampler_val,
-                                     drop_last=False, collate_fn=utils.collate_fn, 
-                                     num_workers=args.num_workers, pin_memory=True)
-        print(f'Evaluation dataloader created: {len(dataset_val)} samples')
-    else:
-        # === TRAIN Mode: Create training dataloader only ===
-        if args.distributed:
-            if args.cache_mode:
-                sampler_train = samplers.NodeDistributedSampler(dataset_train)
-            else:
-                sampler_train = samplers.DistributedSampler(dataset_train)
-        else:
-            sampler_train = torch.utils.data.RandomSampler(dataset_train)
+    elif args.freeze_mode == 'backbone_transformer':
+         # 먼저, pre-trained transformer 가중치가 있는지 확인하고 로드합니다.
+        if args.transformer_weights:
+            print(f"Loading pretrained transformer weights from {args.transformer_weights}")
+            checkpoint = torch.load(args.transformer_weights, map_location='cpu')
 
-        batch_sampler_train = torch.utils.data.BatchSampler(sampler_train, args.batch_size, drop_last=True)
-        data_loader_train = DataLoader(dataset_train, batch_sampler=batch_sampler_train,
-                                       collate_fn=utils.collate_fn, num_workers=args.num_workers,
-                                       pin_memory=True)
-        print(f'Training dataloader created: {len(dataset_train)} samples')
+            # Transformer에 해당하는 state_dict만 추출
+            transformer_state_dict = {}
+            for k, v in checkpoint['model'].items():
+                if k.startswith('transformer'):
+                    transformer_state_dict[k] = v
+
+            del checkpoint
+            import gc
+            gc.collect()
+
+            # strict=False로 하여 transformer 가중치만 로드
+            msg = model_without_ddp.load_state_dict(transformer_state_dict, strict=False)
+            print("Transformer weights loading message:", msg)
+
+            del transformer_state_dict
+            gc.collect()
+    
+        for name, param in model_without_ddp.named_parameters():
+            if name.startswith("backbone") or name.startswith("transformer"):
+                param.requires_grad = False
+    
+    # args.freeze_mode가 'none'인 경우, 아무것도 하지 않고 모든 파라미터를 학습합니다.
+
+    # [확인용] 동결 후 실제 학습될 파라미터 수를 출력합니다.
+    n_parameters_after_freezing = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Parameters to be trained: {n_parameters_after_freezing} (Total: {n_parameters})")
+
+    # 2. 학습할 파라미터('requires_grad=True'인 파라미터)만 Optimizer에 전달합니다.
+    param_dicts = [
+        {"params": [p for p in model_without_ddp.parameters() if p.requires_grad]}
+    ]
+
+    # 3. Optimizer를 생성합니다.
+    if args.sgd:
+        optimizer = torch.optim.SGD(param_dicts, lr=args.lr, momentum=0.9,
+                                    weight_decay=args.weight_decay)
+    else:
+        optimizer = torch.optim.AdamW(param_dicts, lr=args.lr,
+                                      weight_decay=args.weight_decay)
+    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args.lr_drop)
+
+    dataset_train, dataset_val = get_datasets(args)
+    
+    if args.distributed:
+        if args.cache_mode:
+            sampler_train = samplers.NodeDistributedSampler(dataset_train)
+            sampler_val = samplers.NodeDistributedSampler(dataset_val, shuffle=False)
+        else:
+            sampler_train = samplers.DistributedSampler(dataset_train)
+            sampler_val = samplers.DistributedSampler(dataset_val, shuffle=False)
+    else:
+        sampler_train = torch.utils.data.RandomSampler(dataset_train)
+        sampler_val = torch.utils.data.SequentialSampler(dataset_val)
+
+    batch_sampler_train = torch.utils.data.BatchSampler(sampler_train, args.batch_size, drop_last=True)
+    data_loader_train = DataLoader(dataset_train, batch_sampler=batch_sampler_train,
+                                   collate_fn=utils.collate_fn, num_workers=args.num_workers,
+                                   pin_memory=True)
+    data_loader_val = DataLoader(dataset_val, args.batch_size, sampler=sampler_val,
+                                 drop_last=False, collate_fn=utils.collate_fn, num_workers=args.num_workers,
+                                 pin_memory=True)
     
     
 
@@ -659,22 +651,29 @@ def main(args):
                 break
         return out
 
+    # param_dicts = [
+    #     {
+    #         "params":
+    #             [p for n, p in model_without_ddp.named_parameters()
+    #              if not match_name_keywords(n, args.lr_backbone_names) and not match_name_keywords(n, args.lr_linear_proj_names) and p.requires_grad],
+    #         "lr": args.lr,
+    #     },
+    #     {
+    #         "params": [p for n, p in model_without_ddp.named_parameters() if match_name_keywords(n, args.lr_backbone_names) and p.requires_grad],
+    #         "lr": args.lr_backbone,
+    #     },
+    #     {
+    #         "params": [p for n, p in model_without_ddp.named_parameters() if match_name_keywords(n, args.lr_linear_proj_names) and p.requires_grad],
+    #         "lr": args.lr * args.lr_linear_proj_mult,
+    #     }
+    # ]
+
+    # 2. 학습할 파라미터만 필터링하여 optimizer에 전달합니다.
+    #    (requires_grad가 True인 파라미터만 학습 대상이 됩니다)
     param_dicts = [
-        {
-            "params":
-                [p for n, p in model_without_ddp.named_parameters()
-                 if not match_name_keywords(n, args.lr_backbone_names) and not match_name_keywords(n, args.lr_linear_proj_names) and p.requires_grad],
-            "lr": args.lr,
-        },
-        {
-            "params": [p for n, p in model_without_ddp.named_parameters() if match_name_keywords(n, args.lr_backbone_names) and p.requires_grad],
-            "lr": args.lr_backbone,
-        },
-        {
-            "params": [p for n, p in model_without_ddp.named_parameters() if match_name_keywords(n, args.lr_linear_proj_names) and p.requires_grad],
-            "lr": args.lr * args.lr_linear_proj_mult,
-        }
+        {"params": [p for n, p in model_without_ddp.named_parameters() if p.requires_grad]}
     ]
+
     if args.sgd:
         optimizer = torch.optim.SGD(param_dicts, lr=args.lr, momentum=0.9,
                                     weight_decay=args.weight_decay)
@@ -692,7 +691,7 @@ def main(args):
         coco_val = datasets.coco.build("val", args)
         base_ds = get_coco_api_from_dataset(coco_val)
     elif args.dataset == "coco":
-        base_ds = get_coco_api_from_dataset(dataset_val) if dataset_val is not None else None
+        base_ds = get_coco_api_from_dataset(dataset_val)
     else:
         base_ds = dataset_val
 
@@ -763,93 +762,83 @@ def main(args):
             
         obj_bn_mean_before=model_without_ddp.prob_obj_head[0].objectness_bn.running_mean
     
-    # === Main Training Loop (TRAIN mode only) ===
-    if not args.eval:
-        print(f'=== Training started: epoch {args.start_epoch} to {args.epochs} ===')
-        start_time = time.time()
-        for epoch in range(args.start_epoch, args.epochs):
-            if args.distributed:
-                sampler_train.set_epoch(epoch)
+    print(f'Start training from epoch {args.start_epoch} to {args.epochs}')
+    start_time = time.time()
+    for epoch in range(args.start_epoch, args.epochs):
+        if args.distributed:
+            sampler_train.set_epoch(epoch)
             
-            print(f'=== Epoch {epoch} training started ===')    
-            # Execute one epoch training with memory usage monitoring
-            train_stats = train_one_epoch(
-                model, criterion, data_loader_train, optimizer, device, epoch, args.nc_epoch, args.clip_max_norm, wandb)
+        train_stats = train_one_epoch(
+            model, criterion, data_loader_train, optimizer, device, epoch, args.nc_epoch, args.clip_max_norm, wandb)
             
-            # Learning rate scheduling    
-            lr_scheduler.step()
-            
-            # === Simple log statistics only ===
-            test_stats = {}  # No evaluation, empty statistics
-                
-            log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
-                         **{f'test_{k}': v for k, v in test_stats.items()},
-                         'epoch': epoch,
-                         'n_parameters': n_parameters}
-            
-            # === Save simple logs only ===
-            if args.output_dir and utils.is_main_process():
-                with (output_dir / "log.txt").open("a") as f:
-                    f.write(json.dumps(log_stats) + "\n")
-
-        # === Exemplar Replay Selection (TRAIN mode only) ===
-        if args.exemplar_replay_selection:
-            print('=== Creating Exemplar Replay dataset ===')
-            image_sorted_scores = get_exemplar_replay(model, exemplar_selection, device, data_loader_train)
-            create_ft_dataset(args, image_sorted_scores)
-        
-        # === Save Task-specific Final Weights (TRAIN mode only) ===
+        lr_scheduler.step()
         if args.output_dir:
-            # Save task-specific final weights (Task 1 = task1_final.pth, Task 2 = task2_final.pth, ...)
-            if hasattr(args, 'wandb_name') and ('T1' in args.wandb_name or '_t1' in args.wandb_name):
-                final_checkpoint_name = 'task1_final.pth'
-            elif hasattr(args, 'wandb_name') and ('T2' in args.wandb_name or '_t2' in args.wandb_name):
-                final_checkpoint_name = 'task2_final.pth'
-            elif hasattr(args, 'wandb_name') and ('T3' in args.wandb_name or '_t3' in args.wandb_name):
-                final_checkpoint_name = 'task3_final.pth'
+            checkpoint_paths = [output_dir / 'checkpoint.pth']
+            # extra checkpoint before LR drop and every 5 epochs
+            if (epoch + 1) % args.lr_drop == 0 or (epoch % args.eval_every == 0 or epoch == 0 or epoch == 1 or (args.epochs-epoch)<1):
+                test_stats, coco_evaluator = evaluate(
+                    model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir, args)
+                checkpoint_paths.append(output_dir / f'checkpoint{epoch:04}.pth')
+                if wandb is not None:
+                    test_stats["metrics"]['epoch']=epoch
+                    wandb.log({str(key): val for key, val in test_stats["metrics"].items()})
+            elif epoch > args.epochs-6:
+                checkpoint_paths.append(output_dir / f'checkpoint{epoch:04}.pth')
+                
             else:
-                final_checkpoint_name = 'task_final.pth'  # fallback
+                 test_stats = {}
+                    
+            for checkpoint_path in checkpoint_paths:
+                utils.save_on_master({
+                    'model': model_without_ddp.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'lr_scheduler': lr_scheduler.state_dict(),
+                    'epoch': epoch,
+                    'args': args,
+                }, checkpoint_path)
             
-            final_checkpoint_path = output_dir / final_checkpoint_name
-            print(f'=== Saving task-specific final weights: {final_checkpoint_path} ===')
-            utils.save_on_master({
-                'model': model_without_ddp.state_dict(),
-                'optimizer': optimizer.state_dict(),
-                'lr_scheduler': lr_scheduler.state_dict(),
-                'epoch': args.epochs - 1,  # last epoch
-                'args': args,
-            }, final_checkpoint_path)
+        log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
+                     **{f'test_{k}': v for k, v in test_stats.items()},
+                     'epoch': epoch,
+                     'n_parameters': n_parameters}
         
-        # === Training completion ===        
-        total_time = time.time() - start_time
-        total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-        print(f'=== Training completed! Total time: {total_time_str} ===')
-    else:
-        print(f'=== Evaluation completed! ===')
+        if args.output_dir and utils.is_main_process():
+            with (output_dir / "log.txt").open("a") as f:
+                f.write(json.dumps(log_stats) + "\n")
+            if args.dataset in ['owod', 'owdetr'] and epoch % args.eval_every == 0 and epoch > 0:
+                # for evaluation logs
+                if coco_evaluator is not None:
+                    (output_dir / 'eval').mkdir(exist_ok=True)
+                    if "bbox" in coco_evaluator.coco_eval:
+                        filenames = ['latest.pth']
+                        if epoch % 50 == 0:
+                            filenames.append(f'{epoch:03}.pth')
+                        for name in filenames:
+                            torch.save(coco_evaluator.coco_eval["bbox"].eval,
+                                    output_dir / "eval" / name)
+                            
+            
+    if args.exemplar_replay_selection:
+        image_sorted_scores = get_exemplar_replay(model,exemplar_selection, device, data_loader_train)
+        create_ft_dataset(args, image_sorted_scores)
+            
+    total_time = time.time() - start_time
+    total_time_str = str(datetime.timedelta(seconds=int(total_time)))
+    print('Training time {}'.format(total_time_str))
     return
 
 def get_datasets(args):
-    """
-    Mode-specific dataset loading function - creates only required datasets to save memory
-    """
-    print(f'=== Dataset loading: {args.dataset} ===')
+    print(args.dataset)
 
-    dataset_train = None
-    dataset_val = None
-    
-    if args.eval:
-        # === EVAL Mode: Create validation dataset only ===
-        print(f'EVAL mode: Loading validation dataset only...')
-        dataset_val = OWDetection(args, args.data_root, image_set=args.test_set, dataset=args.dataset, 
-                                 transforms=custom_coco_transform(args.test_set, args.custom_scales, args.custom_max_size))
-        print(f'Validation dataset: {args.test_set} ({len(dataset_val)} samples)')
-    else:
-        # === TRAIN Mode: Create training dataset only ===
-        print(f'TRAIN mode: Loading training dataset only...')
-        dataset_train = OWDetection(args, args.data_root, image_set=args.train_set, 
-                                   transforms=custom_coco_transform(args.train_set, args.custom_scales, args.custom_max_size), 
-                                   dataset=args.dataset)
-        print(f'Training dataset: {args.train_set} ({len(dataset_train)} samples)')
+    train_set = args.train_set
+    test_set = args.test_set
+    dataset_train = OWDetection(args, args.data_root, image_set=args.train_set, transforms=custom_coco_transform(args.train_set, args.custom_scales, args.custom_max_size), dataset = args.dataset)
+    dataset_val = OWDetection(args, args.data_root, image_set=args.test_set, dataset = args.dataset, transforms=custom_coco_transform(args.test_set, args.custom_scales, args.custom_max_size))
+
+    print(args.train_set)
+    print(args.test_set)
+    print(dataset_train)
+    print(dataset_val)
 
     return dataset_train, dataset_val
 
