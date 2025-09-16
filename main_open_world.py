@@ -602,26 +602,51 @@ def main(args):
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print('number of params:', n_parameters)
 
-    dataset_train, dataset_val = get_datasets(args)
-    
-    if args.distributed:
-        if args.cache_mode:
-            sampler_train = samplers.NodeDistributedSampler(dataset_train)
-            sampler_val = samplers.NodeDistributedSampler(dataset_val, shuffle=False)
-        else:
-            sampler_train = samplers.DistributedSampler(dataset_train)
-            sampler_val = samplers.DistributedSampler(dataset_val, shuffle=False)
+    # === Mode-specific Dataset Loading ===
+    # Train mode: Load only training dataset
+    # Eval mode: Load only evaluation dataset
+    if args.eval:
+        print('=== EVAL Mode: Loading evaluation dataset only ===')
+        _, dataset_val = get_datasets(args)
+        dataset_train = None
     else:
-        sampler_train = torch.utils.data.RandomSampler(dataset_train)
-        sampler_val = torch.utils.data.SequentialSampler(dataset_val)
+        print('=== TRAIN Mode: Loading training dataset only ===')
+        dataset_train, _ = get_datasets(args)
+        dataset_val = None
+    
+    # === Mode-specific DataLoader Creation ===
+    data_loader_train = None
+    data_loader_val = None
+    
+    if args.eval:
+        # === EVAL Mode: Create evaluation dataloader only ===
+        if args.distributed:
+            if args.cache_mode:
+                sampler_val = samplers.NodeDistributedSampler(dataset_val, shuffle=False)
+            else:
+                sampler_val = samplers.DistributedSampler(dataset_val, shuffle=False)
+        else:
+            sampler_val = torch.utils.data.SequentialSampler(dataset_val)
+            
+        data_loader_val = DataLoader(dataset_val, args.batch_size, sampler=sampler_val,
+                                     drop_last=False, collate_fn=utils.collate_fn, 
+                                     num_workers=args.num_workers, pin_memory=True)
+        print(f'Evaluation dataloader created: {len(dataset_val)} samples')
+    else:
+        # === TRAIN Mode: Create training dataloader only ===
+        if args.distributed:
+            if args.cache_mode:
+                sampler_train = samplers.NodeDistributedSampler(dataset_train)
+            else:
+                sampler_train = samplers.DistributedSampler(dataset_train)
+        else:
+            sampler_train = torch.utils.data.RandomSampler(dataset_train)
 
-    batch_sampler_train = torch.utils.data.BatchSampler(sampler_train, args.batch_size, drop_last=True)
-    data_loader_train = DataLoader(dataset_train, batch_sampler=batch_sampler_train,
-                                   collate_fn=utils.collate_fn, num_workers=args.num_workers,
-                                   pin_memory=True)
-    data_loader_val = DataLoader(dataset_val, args.batch_size, sampler=sampler_val,
-                                 drop_last=False, collate_fn=utils.collate_fn, num_workers=args.num_workers,
-                                 pin_memory=True)
+        batch_sampler_train = torch.utils.data.BatchSampler(sampler_train, args.batch_size, drop_last=True)
+        data_loader_train = DataLoader(dataset_train, batch_sampler=batch_sampler_train,
+                                       collate_fn=utils.collate_fn, num_workers=args.num_workers,
+                                       pin_memory=True)
+        print(f'Training dataloader created: {len(dataset_train)} samples')
     
     
 
@@ -667,7 +692,7 @@ def main(args):
         coco_val = datasets.coco.build("val", args)
         base_ds = get_coco_api_from_dataset(coco_val)
     elif args.dataset == "coco":
-        base_ds = get_coco_api_from_dataset(dataset_val)
+        base_ds = get_coco_api_from_dataset(dataset_val) if dataset_val is not None else None
     else:
         base_ds = dataset_val
 
@@ -738,83 +763,93 @@ def main(args):
             
         obj_bn_mean_before=model_without_ddp.prob_obj_head[0].objectness_bn.running_mean
     
-    print(f'Start training from epoch {args.start_epoch} to {args.epochs}')
-    start_time = time.time()
-    for epoch in range(args.start_epoch, args.epochs):
-        if args.distributed:
-            sampler_train.set_epoch(epoch)
+    # === Main Training Loop (TRAIN mode only) ===
+    if not args.eval:
+        print(f'=== Training started: epoch {args.start_epoch} to {args.epochs} ===')
+        start_time = time.time()
+        for epoch in range(args.start_epoch, args.epochs):
+            if args.distributed:
+                sampler_train.set_epoch(epoch)
             
-        train_stats = train_one_epoch(
-            model, criterion, data_loader_train, optimizer, device, epoch, args.nc_epoch, args.clip_max_norm, wandb)
+            print(f'=== Epoch {epoch} training started ===')    
+            # Execute one epoch training with memory usage monitoring
+            train_stats = train_one_epoch(
+                model, criterion, data_loader_train, optimizer, device, epoch, args.nc_epoch, args.clip_max_norm, wandb)
             
-        lr_scheduler.step()
-        if args.output_dir:
-            checkpoint_paths = [output_dir / 'checkpoint.pth']
-            # extra checkpoint before LR drop and every 5 epochs
-            if (epoch + 1) % args.lr_drop == 0 or (epoch % args.eval_every == 0 or epoch == 0 or epoch == 1 or (args.epochs-epoch)<1):
-                test_stats, coco_evaluator = evaluate(
-                    model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir, args)
-                checkpoint_paths.append(output_dir / f'checkpoint{epoch:04}.pth')
-                if wandb is not None:
-                    test_stats["metrics"]['epoch']=epoch
-                    wandb.log({str(key): val for key, val in test_stats["metrics"].items()})
-            elif epoch > args.epochs-6:
-                checkpoint_paths.append(output_dir / f'checkpoint{epoch:04}.pth')
+            # Learning rate scheduling    
+            lr_scheduler.step()
+            
+            # === Simple log statistics only ===
+            test_stats = {}  # No evaluation, empty statistics
                 
-            else:
-                 test_stats = {}
-                    
-            for checkpoint_path in checkpoint_paths:
-                utils.save_on_master({
-                    'model': model_without_ddp.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'lr_scheduler': lr_scheduler.state_dict(),
-                    'epoch': epoch,
-                    'args': args,
-                }, checkpoint_path)
+            log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
+                         **{f'test_{k}': v for k, v in test_stats.items()},
+                         'epoch': epoch,
+                         'n_parameters': n_parameters}
             
-        log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
-                     **{f'test_{k}': v for k, v in test_stats.items()},
-                     'epoch': epoch,
-                     'n_parameters': n_parameters}
+            # === Save simple logs only ===
+            if args.output_dir and utils.is_main_process():
+                with (output_dir / "log.txt").open("a") as f:
+                    f.write(json.dumps(log_stats) + "\n")
+
+        # === Exemplar Replay Selection (TRAIN mode only) ===
+        if args.exemplar_replay_selection:
+            print('=== Creating Exemplar Replay dataset ===')
+            image_sorted_scores = get_exemplar_replay(model, exemplar_selection, device, data_loader_train)
+            create_ft_dataset(args, image_sorted_scores)
         
-        if args.output_dir and utils.is_main_process():
-            with (output_dir / "log.txt").open("a") as f:
-                f.write(json.dumps(log_stats) + "\n")
-            if args.dataset in ['owod', 'owdetr'] and epoch % args.eval_every == 0 and epoch > 0:
-                # for evaluation logs
-                if coco_evaluator is not None:
-                    (output_dir / 'eval').mkdir(exist_ok=True)
-                    if "bbox" in coco_evaluator.coco_eval:
-                        filenames = ['latest.pth']
-                        if epoch % 50 == 0:
-                            filenames.append(f'{epoch:03}.pth')
-                        for name in filenames:
-                            torch.save(coco_evaluator.coco_eval["bbox"].eval,
-                                    output_dir / "eval" / name)
-                            
+        # === Save Task-specific Final Weights (TRAIN mode only) ===
+        if args.output_dir:
+            # Save task-specific final weights (Task 1 = task1_final.pth, Task 2 = task2_final.pth, ...)
+            if hasattr(args, 'wandb_name') and ('T1' in args.wandb_name or '_t1' in args.wandb_name):
+                final_checkpoint_name = 'task1_final.pth'
+            elif hasattr(args, 'wandb_name') and ('T2' in args.wandb_name or '_t2' in args.wandb_name):
+                final_checkpoint_name = 'task2_final.pth'
+            elif hasattr(args, 'wandb_name') and ('T3' in args.wandb_name or '_t3' in args.wandb_name):
+                final_checkpoint_name = 'task3_final.pth'
+            else:
+                final_checkpoint_name = 'task_final.pth'  # fallback
             
-    if args.exemplar_replay_selection:
-        image_sorted_scores = get_exemplar_replay(model,exemplar_selection, device, data_loader_train)
-        create_ft_dataset(args, image_sorted_scores)
-            
-    total_time = time.time() - start_time
-    total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-    print('Training time {}'.format(total_time_str))
+            final_checkpoint_path = output_dir / final_checkpoint_name
+            print(f'=== Saving task-specific final weights: {final_checkpoint_path} ===')
+            utils.save_on_master({
+                'model': model_without_ddp.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'lr_scheduler': lr_scheduler.state_dict(),
+                'epoch': args.epochs - 1,  # last epoch
+                'args': args,
+            }, final_checkpoint_path)
+        
+        # === Training completion ===        
+        total_time = time.time() - start_time
+        total_time_str = str(datetime.timedelta(seconds=int(total_time)))
+        print(f'=== Training completed! Total time: {total_time_str} ===')
+    else:
+        print(f'=== Evaluation completed! ===')
     return
 
 def get_datasets(args):
-    print(args.dataset)
+    """
+    Mode-specific dataset loading function - creates only required datasets to save memory
+    """
+    print(f'=== Dataset loading: {args.dataset} ===')
 
-    train_set = args.train_set
-    test_set = args.test_set
-    dataset_train = OWDetection(args, args.data_root, image_set=args.train_set, transforms=custom_coco_transform(args.train_set, args.custom_scales, args.custom_max_size), dataset = args.dataset)
-    dataset_val = OWDetection(args, args.data_root, image_set=args.test_set, dataset = args.dataset, transforms=custom_coco_transform(args.test_set, args.custom_scales, args.custom_max_size))
-
-    print(args.train_set)
-    print(args.test_set)
-    print(dataset_train)
-    print(dataset_val)
+    dataset_train = None
+    dataset_val = None
+    
+    if args.eval:
+        # === EVAL Mode: Create validation dataset only ===
+        print(f'EVAL mode: Loading validation dataset only...')
+        dataset_val = OWDetection(args, args.data_root, image_set=args.test_set, dataset=args.dataset, 
+                                 transforms=custom_coco_transform(args.test_set, args.custom_scales, args.custom_max_size))
+        print(f'Validation dataset: {args.test_set} ({len(dataset_val)} samples)')
+    else:
+        # === TRAIN Mode: Create training dataset only ===
+        print(f'TRAIN mode: Loading training dataset only...')
+        dataset_train = OWDetection(args, args.data_root, image_set=args.train_set, 
+                                   transforms=custom_coco_transform(args.train_set, args.custom_scales, args.custom_max_size), 
+                                   dataset=args.dataset)
+        print(f'Training dataset: {args.train_set} ({len(dataset_train)} samples)')
 
     return dataset_train, dataset_val
 

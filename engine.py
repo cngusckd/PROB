@@ -98,12 +98,23 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 ## ORIGINAL FUNCTION
 @torch.no_grad()
 def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, output_dir, args):
+    # import ipdb; ipdb.set_trace()
     model.eval()
     criterion.eval()
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = 'Test:'
     iou_types = tuple(k for k in ('segm', 'bbox') if k in postprocessors.keys())
     coco_evaluator = OWEvaluator(base_ds, iou_types, args=args)
+    
+    # === EVAL 메모리 측정 초기화 ===
+    import wandb
+    from main_open_world import get_memory_mb, get_my_gpu_memory_usage
+    import torch
+    
+    print("=== EVAL 메모리 측정 시작 ===")
+    eval_step = 0
+    prev_cpu_memory = None  # 이전 스텝의 CPU 메모리 저장
+    prev_gpu_memory = None  # 이전 스텝의 GPU 메모리 저장
  
     panoptic_evaluator = None
     if 'panoptic' in postprocessors.keys():
@@ -116,28 +127,198 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
     for samples, targets in metric_logger.log_every(data_loader, 10, header):
         samples = samples.to(device)
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
+        
+        # === EVAL Forward 전 메모리 측정 ===
+        before_forward_memory = get_memory_mb()
+        before_forward_gpu_usage = get_my_gpu_memory_usage()[0][1] if get_my_gpu_memory_usage() else 0
+        before_forward_gpu_allocated = torch.cuda.memory_allocated(device)
+        before_forward_gpu_reserved = torch.cuda.memory_reserved(device)
+        
         outputs = model(samples)
+        
+        # === EVAL Forward 후 메모리 측정 ===
+        after_forward_memory = get_memory_mb()
+        after_forward_gpu_usage = get_my_gpu_memory_usage()[0][1] if get_my_gpu_memory_usage() else 0
+        after_forward_gpu_allocated = torch.cuda.memory_allocated(device)
+        after_forward_gpu_reserved = torch.cuda.memory_reserved(device)
+        after_forward_gpu_max_allocated = torch.cuda.max_memory_allocated(device)
+        
+        # === 메모리 변화량 계산 ===
+        cpu_memory_delta = after_forward_memory['current_total'] - before_forward_memory['current_total']
+        gpu_allocated_delta = (after_forward_gpu_allocated - before_forward_gpu_allocated) / 1024 ** 2
+        gpu_pynvml_delta = after_forward_gpu_usage - before_forward_gpu_usage
+        
+        # === 매 100 스텝마다 WandB 로깅 (효율성 향상) ===
+        if eval_step % 100 == 0 and wandb is not None and wandb.run is not None:
+            wandb.log({
+                # 기본 메모리 상태
+                "EVAL_CPU_Current": after_forward_memory['current_total'],
+                "EVAL_GPU_Allocated_MB": float(after_forward_gpu_allocated / 1024 ** 2),
+                "EVAL_GPU_Reserved_MB": float(after_forward_gpu_reserved / 1024 ** 2),
+                "EVAL_GPU_Max_Allocated_MB": float(after_forward_gpu_max_allocated / 1024 ** 2),
+                "EVAL_GPU_pynvml_MB": float(after_forward_gpu_usage),
+                
+                # 메모리 변화량 (최적화 효과 확인용)
+                "EVAL_CPU_Delta": cpu_memory_delta,
+                "EVAL_GPU_Allocated_Delta_MB": gpu_allocated_delta,
+                "EVAL_GPU_pynvml_Delta_MB": gpu_pynvml_delta,
+                
+                # 진행 상황
+                "EVAL_Step": eval_step,
+                "EVAL_Progress": float(eval_step / len(data_loader) * 100),
+            })
+            
+            # 터미널에도 간단히 출력 (100 스텝마다)
+            progress = eval_step / len(data_loader) * 100
+            print(f"[Step {eval_step:4d}] 진행률: {progress:5.1f}% | "
+                  f"CPU: {after_forward_memory['current_total']:.0f}MB | "
+                  f"GPU: {after_forward_gpu_allocated/1024**2:.0f}MB")
+        
+        eval_step += 1
 
         orig_target_sizes = torch.stack([t["orig_size"] for t in targets], dim=0)
         results = postprocessors['bbox'](outputs, orig_target_sizes)
- 
+
         if 'segm' in postprocessors.keys():
             target_sizes = torch.stack([t["size"] for t in targets], dim=0)
             results = postprocessors['segm'](results, outputs, orig_target_sizes, target_sizes)
         res = {target['image_id'].item(): output for target, output in zip(targets, results)}
         if coco_evaluator is not None:
             coco_evaluator.update(res)
- 
+            
+        # === Panoptic 평가 (최적화 전에 처리) ===
         if panoptic_evaluator is not None:
+            target_sizes = torch.stack([t["size"] for t in targets], dim=0)
             res_pano = postprocessors["panoptic"](outputs, target_sizes, orig_target_sizes)
             for i, target in enumerate(targets):
                 image_id = target["image_id"].item()
                 file_name = f"{image_id:012d}.png"
                 res_pano[i]["image_id"] = image_id
                 res_pano[i]["file_name"] = file_name
- 
             panoptic_evaluator.update(res_pano)
+            
+        # === 메모리 최적화 전 측정 ===
+        before_optimization_memory = get_memory_mb()
+        before_optimization_gpu_allocated = torch.cuda.memory_allocated(device)
+        
+        # === 메모리 최적화 기법 적용 ===
+        # 1. 불필요한 변수 명시적 삭제
+        del outputs
+        del results
+        del res
+        del orig_target_sizes
+        if 'segm' in postprocessors.keys() or panoptic_evaluator is not None:
+            if 'target_sizes' in locals():
+                del target_sizes
+        if panoptic_evaluator is not None:
+            del res_pano
+            
+        # 2. 파이썬 가비지 컬렉션 강제 실행
+        import gc
+        gc.collect()
+        
+        # 3. CUDA 캐시 정리
+        torch.cuda.empty_cache()
+        
+        # === 메모리 최적화 후 측정 ===
+        after_optimization_memory = get_memory_mb()
+        after_optimization_gpu_allocated = torch.cuda.memory_allocated(device)
+        
+        # === 최적화 효과 계산 ===
+        optimization_cpu_saved = before_optimization_memory['current_total'] - after_optimization_memory['current_total']
+        optimization_gpu_saved = (before_optimization_gpu_allocated - after_optimization_gpu_allocated) / 1024 ** 2
+        
+        # === 최적화 효과 로깅 (매 100 스텝마다) ===
+        if eval_step % 100 == 0 and wandb is not None and wandb.run is not None:
+            # 최적화 전후 비교 메트릭
+            before_opt_cpu = before_optimization_memory['current_total']
+            after_opt_cpu = after_optimization_memory['current_total']
+            before_opt_gpu = float(before_optimization_gpu_allocated / 1024 ** 2)
+            after_opt_gpu = float(after_optimization_gpu_allocated / 1024 ** 2)
+            
+            # 스텝 간 변화량 계산
+            step_cpu_delta = after_opt_cpu - prev_cpu_memory if prev_cpu_memory is not None else 0.0
+            step_gpu_delta = after_opt_gpu - prev_gpu_memory if prev_gpu_memory is not None else 0.0
+            
+            wandb.log({
+                # === 기본 메모리 상태 ===
+                "EVAL_Current_CPU_MB": after_opt_cpu,
+                "EVAL_Current_GPU_MB": after_opt_gpu,
+                
+                # === 최적화 전후 비교 ===
+                "EVAL_Before_Opt_CPU_MB": before_opt_cpu,
+                "EVAL_After_Opt_CPU_MB": after_opt_cpu,
+                "EVAL_Before_Opt_GPU_MB": before_opt_gpu,
+                "EVAL_After_Opt_GPU_MB": after_opt_gpu,
+                
+                # === 최적화 절약량 ===
+                "EVAL_CPU_Saved_MB": optimization_cpu_saved,
+                "EVAL_GPU_Saved_MB": optimization_gpu_saved,
+                "EVAL_Total_Saved_MB": optimization_cpu_saved + optimization_gpu_saved,
+                
+                # === 최적화 효율성 (%) ===
+                "EVAL_CPU_Efficiency_Percent": (optimization_cpu_saved / before_opt_cpu * 100) if before_opt_cpu > 0 else 0,
+                "EVAL_GPU_Efficiency_Percent": (optimization_gpu_saved / before_opt_gpu * 100) if before_opt_gpu > 0 else 0,
+                
+                # === 스텝 간 변화량 ===
+                "EVAL_Step_CPU_Delta_MB": step_cpu_delta,
+                "EVAL_Step_GPU_Delta_MB": step_gpu_delta,
+                
+                # === 진행 상황 ===
+                "EVAL_Step": eval_step,
+                "EVAL_Progress_Percent": float(eval_step / len(data_loader) * 100),
+                
+                # === 누적 통계 ===
+                "EVAL_Cumulative_CPU_Saved_MB": float(optimization_cpu_saved) if optimization_cpu_saved > 0 else 0,
+                "EVAL_Cumulative_GPU_Saved_MB": float(optimization_gpu_saved) if optimization_gpu_saved > 0 else 0,
+            })
+            
+            # 최적화 효과 터미널 출력 (상세)
+            cpu_efficiency = (optimization_cpu_saved / before_opt_cpu * 100) if before_opt_cpu > 0 else 0
+            gpu_efficiency = (optimization_gpu_saved / before_opt_gpu * 100) if before_opt_gpu > 0 else 0
+            
+            # 스텝 간 변화량 계산 및 간단한 출력
+            step_cpu_delta = 0.0
+            if prev_cpu_memory is not None:
+                step_cpu_delta = after_opt_cpu - prev_cpu_memory
+            
+            # 최적화 전후 비교 명확히 출력
+            print(f"[Step {eval_step:4d}] 메모리 최적화 전후:")
+            print(f"    ├─ CPU: {before_opt_cpu:.0f}MB → {after_opt_cpu:.0f}MB "
+                  f"({optimization_cpu_saved:+.1f}MB)")
+            print(f"    └─ GPU: {before_opt_gpu:.0f}MB → {after_opt_gpu:.0f}MB "
+                  f"({optimization_gpu_saved:+.1f}MB)")
+            
+            # 스텝 간 변화량도 표시
+            if prev_cpu_memory is not None and prev_gpu_memory is not None:
+                print(f"[Step {eval_step:4d}] 이전 스텝 대비: CPU {step_cpu_delta:+.1f}MB, GPU {step_gpu_delta:+.1f}MB")
+            
+            # 다음 스텝을 위해 현재 메모리 저장
+            prev_cpu_memory = after_opt_cpu
+            prev_gpu_memory = after_opt_gpu
+
  
+    # === 평가 완료 후 메모리 요약 ===
+    if wandb is not None and wandb.run is not None:
+        final_memory = get_memory_mb()
+        final_gpu = torch.cuda.memory_allocated(device) / 1024 ** 2
+        
+        print("\n" + "="*60)
+        print("평가 완료 - 메모리 사용량 요약")
+        print("="*60)
+        print(f"최종 CPU 메모리: {final_memory['current_total']:.0f}MB")
+        print(f"최종 GPU 메모리: {final_gpu:.0f}MB")
+        print(f"총 처리 스텝: {eval_step}")
+        print("="*60)
+        
+        # WandB 최종 요약 로깅
+        wandb.log({
+            "EVAL_Final_CPU_MB": final_memory['current_total'],
+            "EVAL_Final_GPU_MB": float(final_gpu),
+            "EVAL_Total_Steps": eval_step,
+            "EVAL_Status": "Completed"
+        })
+
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     # print("Averaged stats:", metric_logger)
@@ -145,7 +326,7 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
         coco_evaluator.synchronize_between_processes()
     if panoptic_evaluator is not None:
         panoptic_evaluator.synchronize_between_processes()
- 
+
     # accumulate predictions from all images
     if coco_evaluator is not None:
         coco_evaluator.accumulate()
