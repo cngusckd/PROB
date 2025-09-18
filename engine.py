@@ -230,70 +230,92 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
         
         # === 최적화 효과 로깅 (매 100 스텝마다) ===
         if eval_step % 100 == 0 and wandb is not None and wandb.run is not None:
-            # 최적화 전후 비교 메트릭
+            # === 최적화 전후 메모리 값들 ===
             before_opt_cpu = before_optimization_memory['current_total']
             after_opt_cpu = after_optimization_memory['current_total']
             before_opt_gpu = float(before_optimization_gpu_allocated / 1024 ** 2)
             after_opt_gpu = float(after_optimization_gpu_allocated / 1024 ** 2)
             
-            # 스텝 간 변화량 계산
+            # === 스텝 간 변화량 계산 ===
             step_cpu_delta = after_opt_cpu - prev_cpu_memory if prev_cpu_memory is not None else 0.0
             step_gpu_delta = after_opt_gpu - prev_gpu_memory if prev_gpu_memory is not None else 0.0
             
+            # === 최적화 효율성 계산 ===
+            cpu_efficiency = (optimization_cpu_saved / before_opt_cpu * 100) if before_opt_cpu > 0 else 0
+            gpu_efficiency = (optimization_gpu_saved / before_opt_gpu * 100) if before_opt_gpu > 0 else 0
+            
+            # === WandB 상세 로깅 ===
             wandb.log({
                 # === 기본 메모리 상태 ===
                 "EVAL_Current_CPU_MB": after_opt_cpu,
                 "EVAL_Current_GPU_MB": after_opt_gpu,
                 
-                # === 최적화 전후 비교 ===
+                # === 최적화 전후 비교 (핵심 메트릭) ===
                 "EVAL_Before_Opt_CPU_MB": before_opt_cpu,
                 "EVAL_After_Opt_CPU_MB": after_opt_cpu,
                 "EVAL_Before_Opt_GPU_MB": before_opt_gpu,
                 "EVAL_After_Opt_GPU_MB": after_opt_gpu,
                 
-                # === 최적화 절약량 ===
+                # === 최적화 절약량 (핵심 메트릭) ===
                 "EVAL_CPU_Saved_MB": optimization_cpu_saved,
                 "EVAL_GPU_Saved_MB": optimization_gpu_saved,
                 "EVAL_Total_Saved_MB": optimization_cpu_saved + optimization_gpu_saved,
                 
                 # === 최적화 효율성 (%) ===
-                "EVAL_CPU_Efficiency_Percent": (optimization_cpu_saved / before_opt_cpu * 100) if before_opt_cpu > 0 else 0,
-                "EVAL_GPU_Efficiency_Percent": (optimization_gpu_saved / before_opt_gpu * 100) if before_opt_gpu > 0 else 0,
+                "EVAL_CPU_Efficiency_Percent": cpu_efficiency,
+                "EVAL_GPU_Efficiency_Percent": gpu_efficiency,
+                "EVAL_Total_Efficiency_Percent": (cpu_efficiency + gpu_efficiency) / 2,
                 
-                # === 스텝 간 변화량 ===
+                # === 스텝 간 변화량 (추세 분석용) ===
                 "EVAL_Step_CPU_Delta_MB": step_cpu_delta,
                 "EVAL_Step_GPU_Delta_MB": step_gpu_delta,
+                "EVAL_Step_Total_Delta_MB": step_cpu_delta + step_gpu_delta,
                 
                 # === 진행 상황 ===
                 "EVAL_Step": eval_step,
                 "EVAL_Progress_Percent": float(eval_step / len(data_loader) * 100),
                 
-                # === 누적 통계 ===
-                "EVAL_Cumulative_CPU_Saved_MB": float(optimization_cpu_saved) if optimization_cpu_saved > 0 else 0,
-                "EVAL_Cumulative_GPU_Saved_MB": float(optimization_gpu_saved) if optimization_gpu_saved > 0 else 0,
+                # === 누적 통계 (양수인 경우만) ===
+                "EVAL_Cumulative_CPU_Saved_MB": max(0, float(optimization_cpu_saved)),
+                "EVAL_Cumulative_GPU_Saved_MB": max(0, float(optimization_gpu_saved)),
+                
+                # === 메모리 상태 분류 ===
+                "EVAL_Memory_Status": "Optimized" if (optimization_cpu_saved > 0 or optimization_gpu_saved > 0) else "Stable",
+                "EVAL_CPU_Trend": "Decreasing" if optimization_cpu_saved > 0 else ("Increasing" if optimization_cpu_saved < -1 else "Stable"),
+                "EVAL_GPU_Trend": "Decreasing" if optimization_gpu_saved > 0 else ("Increasing" if optimization_gpu_saved < -1 else "Stable"),
             })
             
-            # 최적화 효과 터미널 출력 (상세)
-            cpu_efficiency = (optimization_cpu_saved / before_opt_cpu * 100) if before_opt_cpu > 0 else 0
-            gpu_efficiency = (optimization_gpu_saved / before_opt_gpu * 100) if before_opt_gpu > 0 else 0
+            # === 터미널 출력 (명확하고 구조화된 형태) ===
+            progress = eval_step / len(data_loader) * 100
+            print(f"\n{'='*70}")
+            print(f"[EVAL Step {eval_step:4d}] 진행률: {progress:5.1f}%")
+            print(f"{'='*70}")
             
-            # 스텝 간 변화량 계산 및 간단한 출력
-            step_cpu_delta = 0.0
-            if prev_cpu_memory is not None:
-                step_cpu_delta = after_opt_cpu - prev_cpu_memory
+            # 최적화 전후 비교 (핵심 정보)
+            print(f"🔧 메모리 최적화 전후 비교:")
+            print(f"   ├─ CPU: {before_opt_cpu:6.1f}MB → {after_opt_cpu:6.1f}MB "
+                  f"({optimization_cpu_saved:+6.1f}MB, {cpu_efficiency:+5.1f}%)")
+            print(f"   └─ GPU: {before_opt_gpu:6.1f}MB → {after_opt_gpu:6.1f}MB "
+                  f"({optimization_gpu_saved:+6.1f}MB, {gpu_efficiency:+5.1f}%)")
             
-            # 최적화 전후 비교 명확히 출력
-            print(f"[Step {eval_step:4d}] 메모리 최적화 전후:")
-            print(f"    ├─ CPU: {before_opt_cpu:.0f}MB → {after_opt_cpu:.0f}MB "
-                  f"({optimization_cpu_saved:+.1f}MB)")
-            print(f"    └─ GPU: {before_opt_gpu:.0f}MB → {after_opt_gpu:.0f}MB "
-                  f"({optimization_gpu_saved:+.1f}MB)")
-            
-            # 스텝 간 변화량도 표시
+            # 스텝 간 변화량 (추세 분석)
             if prev_cpu_memory is not None and prev_gpu_memory is not None:
-                print(f"[Step {eval_step:4d}] 이전 스텝 대비: CPU {step_cpu_delta:+.1f}MB, GPU {step_gpu_delta:+.1f}MB")
+                print(f"📈 이전 스텝 대비 변화량:")
+                print(f"   ├─ CPU: {step_cpu_delta:+6.1f}MB")
+                print(f"   └─ GPU: {step_gpu_delta:+6.1f}MB")
             
-            # 다음 스텝을 위해 현재 메모리 저장
+            # 전체 절약량 요약
+            total_saved = optimization_cpu_saved + optimization_gpu_saved
+            if total_saved > 0:
+                print(f"💾 총 절약량: {total_saved:+6.1f}MB")
+            elif total_saved < -1:
+                print(f"⚠️  메모리 증가: {total_saved:+6.1f}MB")
+            else:
+                print(f"✅ 메모리 안정: {total_saved:+6.1f}MB")
+                
+            print(f"{'='*70}\n")
+            
+            # === 다음 스텝을 위해 현재 메모리 저장 ===
             prev_cpu_memory = after_opt_cpu
             prev_gpu_memory = after_opt_gpu
 
